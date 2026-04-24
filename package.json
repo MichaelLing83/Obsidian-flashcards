@@ -1,0 +1,26 @@
+{
+  "name": "obsidian-flashcards",
+  "version": "1.0.0",
+  "description": "Obsidian plugin: use vault directories as flashcard decks with spaced repetition",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
+  },
+  "keywords": [
+    "obsidian",
+    "flashcards",
+    "spaced-repetition",
+    "anki"
+  ],
+  "author": "MichaelLing83",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^16.11.6",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "^0.25.0",
+    "obsidian": "latest",
+    "tslib": "2.4.0",
+    "typescript": "4.7.4"
+  }
+}

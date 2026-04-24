@@ -1,0 +1,246 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   Obsidian Flashcards Plugin — styles.css
+   Uses standard Obsidian CSS variables so it works with every theme,
+   including both light and dark modes.
+───────────────────────────────────────────────────────────────────────────── */
+
+/* ── Layout ─────────────────────────────────────────────────────────────── */
+
+.flashcard-container {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	padding: 16px;
+	box-sizing: border-box;
+	overflow-y: auto;
+	gap: 12px;
+}
+
+/* ── Empty / complete state ─────────────────────────────────────────────── */
+
+.flashcard-state {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	height: 100%;
+	text-align: center;
+	gap: 12px;
+}
+
+.flashcard-state-icon {
+	font-size: 2.5em;
+}
+
+.flashcard-state-title {
+	margin: 0;
+	font-size: 1.4em;
+}
+
+.flashcard-state-body {
+	margin: 0;
+	color: var(--text-muted);
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────── */
+
+.flashcard-header {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.flashcard-progress-row {
+	display: flex;
+	justify-content: flex-end;
+}
+
+.flashcard-progress-text {
+	font-size: 0.8em;
+	color: var(--text-muted);
+}
+
+.flashcard-progress-bar {
+	width: 100%;
+	height: 4px;
+	background: var(--background-modifier-border);
+	border-radius: 2px;
+	overflow: hidden;
+}
+
+.flashcard-progress-fill {
+	height: 100%;
+	background: var(--interactive-accent);
+	border-radius: 2px;
+	transition: width 0.25s ease;
+}
+
+.flashcard-meta {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.flashcard-type-label {
+	font-size: 0.78em;
+	color: var(--text-faint);
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+}
+
+.flashcard-badge {
+	font-size: 0.72em;
+	font-weight: 600;
+	padding: 2px 7px;
+	border-radius: 10px;
+}
+
+.flashcard-badge-new {
+	background: var(--color-blue);
+	color: #fff;
+}
+
+.flashcard-badge-review {
+	background: var(--background-modifier-border);
+	color: var(--text-muted);
+}
+
+/* ── Card face ──────────────────────────────────────────────────────────── */
+
+.flashcard-card {
+	flex: 1;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 10px;
+	padding: 24px 28px;
+	min-height: 180px;
+	display: flex;
+	flex-direction: column;
+	box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+}
+
+.flashcard-side {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.flashcard-side-label {
+	font-size: 0.72em;
+	text-transform: uppercase;
+	letter-spacing: 0.09em;
+	color: var(--text-faint);
+}
+
+.flashcard-content {
+	font-size: 1.05em;
+	line-height: 1.65;
+}
+
+/* Ensure markdown rendered inside the card respects the card sizing. */
+.flashcard-content p:first-child {
+	margin-top: 0;
+}
+.flashcard-content p:last-child {
+	margin-bottom: 0;
+}
+
+.flashcard-divider {
+	margin: 18px 0;
+	border: none;
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+/* ── Footer / buttons ───────────────────────────────────────────────────── */
+
+.flashcard-footer {
+	display: flex;
+	justify-content: center;
+	align-items: flex-end;
+	gap: 10px;
+	padding-top: 4px;
+}
+
+/* Base button */
+.flashcard-btn {
+	padding: 8px 22px;
+	border-radius: 6px;
+	border: none;
+	cursor: pointer;
+	font-size: 0.92em;
+	font-weight: 500;
+	transition: filter 0.15s ease, transform 0.1s ease;
+}
+
+.flashcard-btn:hover {
+	filter: brightness(1.1);
+}
+
+.flashcard-btn:active {
+	transform: translateY(1px);
+}
+
+/* Primary (Refresh / Start New Session) */
+.flashcard-btn-primary {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
+/* Show Answer */
+.flashcard-btn-show {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	padding: 10px 44px;
+	font-size: 1em;
+}
+
+/* ── Rating bar ─────────────────────────────────────────────────────────── */
+
+.flashcard-rating-bar {
+	display: flex;
+	gap: 8px;
+	justify-content: center;
+	flex-wrap: wrap;
+}
+
+.flashcard-rating-cell {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 4px;
+}
+
+.flashcard-interval-label {
+	font-size: 0.72em;
+	color: var(--text-muted);
+	min-width: 28px;
+	text-align: center;
+}
+
+/* Rating button colours — intentionally opinionated (matches Anki conventions) */
+.flashcard-btn-again {
+	background: #e05252;
+	color: #fff;
+}
+
+.flashcard-btn-hard {
+	background: #d48630;
+	color: #fff;
+}
+
+.flashcard-btn-good {
+	background: #3a8fd4;
+	color: #fff;
+}
+
+.flashcard-btn-easy {
+	background: #3aad5e;
+	color: #fff;
+}
+
+/* ── Settings help text ─────────────────────────────────────────────────── */
+
+.setting-item-description ul {
+	margin: 4px 0 0 0;
+	padding-left: 18px;
+}

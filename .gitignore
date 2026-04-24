@@ -1,0 +1,13 @@
+# Obsidian plugin build artifacts & dependencies
+node_modules/
+
+# Source maps (embedded in main.js during dev; excluded from prod build)
+*.js.map
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
