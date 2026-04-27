@@ -2,7 +2,6 @@ import {
 	App,
 	ItemView,
 	MarkdownRenderer,
-	Notice,
 	Plugin,
 	PluginSettingTab,
 	Setting,
@@ -51,13 +50,11 @@ interface PluginStoredData {
 }
 
 interface FlashcardsSettings {
-	deckFolder: string;
 	newCardsPerDay: number;
 	maxReviewsPerDay: number;
 }
 
 const DEFAULT_SETTINGS: FlashcardsSettings = {
-	deckFolder: "",
 	newCardsPerDay: 20,
 	maxReviewsPerDay: 100,
 };
@@ -142,6 +139,8 @@ export class FlashcardView extends ItemView {
 	private queue: StudyCard[] = [];
 	private idx = 0;
 	private revealed = false;
+	private queueBuildError = "";
+	private discoveredDeckCount = 0;
 
 	constructor(leaf: WorkspaceLeaf, plugin: FlashcardsPlugin) {
 		super(leaf);
@@ -173,21 +172,22 @@ export class FlashcardView extends ItemView {
 	// ── Queue building ─────────────────────────────────────────────────────
 
 	private async buildQueue(): Promise<void> {
-		const { deckFolder, newCardsPerDay, maxReviewsPerDay } =
-			this.plugin.settings;
+		const { newCardsPerDay, maxReviewsPerDay } = this.plugin.settings;
+		const deckDiscovery = this.plugin.discoverDeckFolders();
 
-		if (!deckFolder) {
+		this.queueBuildError = deckDiscovery.error;
+		this.discoveredDeckCount = deckDiscovery.decks.length;
+		if (this.queueBuildError) {
 			this.queue = [];
 			return;
 		}
 
-		const folder = this.app.vault.getAbstractFileByPath(deckFolder);
-		if (!(folder instanceof TFolder)) {
+		const files = deckDiscovery.decks.flatMap((deck) => this.collectMdFiles(deck));
+		if (files.length === 0) {
 			this.queue = [];
 			return;
 		}
 
-		const files = this.collectMdFiles(folder);
 		const now = Date.now();
 		const due: StudyCard[] = [];
 
@@ -312,21 +312,29 @@ export class FlashcardView extends ItemView {
 		el.empty();
 		el.addClass("flashcard-container");
 
-		if (!this.plugin.settings.deckFolder) {
+		if (this.queueBuildError) {
 			this.renderMessage(
 				el,
-				"⚙️ No deck folder configured",
-				"Open Settings → Flashcards and set the Deck Folder path.",
+				"⚠️ Deck configuration error",
+				this.queueBuildError,
 			);
 			return;
 		}
 
 		if (this.queue.length === 0) {
-			this.renderMessage(
-				el,
-				"🎉 All caught up!",
-				"No cards are due for review right now.",
-			);
+			if (this.discoveredDeckCount === 0) {
+				this.renderMessage(
+					el,
+					"📂 No flashcard decks found",
+					"Add frontmatter (flashcards: true / card_type / card_front) to at least one Markdown file in a folder to mark it as a deck.",
+				);
+			} else {
+				this.renderMessage(
+					el,
+					"🎉 All caught up!",
+					"No cards are due for review right now.",
+				);
+			}
 			return;
 		}
 
@@ -519,22 +527,6 @@ class FlashcardsSettingTab extends PluginSettingTab {
 		containerEl.empty();
 		containerEl.createEl("h2", { text: "Flashcards Settings" });
 
-		// Deck folder
-		new Setting(containerEl)
-			.setName("Deck Folder")
-			.setDesc(
-				'Path to the folder whose notes become flashcards (e.g. "Flashcards" or "Notes/Vocab").',
-			)
-			.addText((text) =>
-				text
-					.setPlaceholder("Flashcards")
-					.setValue(this.plugin.settings.deckFolder)
-					.onChange(async (value) => {
-						this.plugin.settings.deckFolder = value.trim();
-						await this.plugin.persistData();
-					}),
-			);
-
 		// New cards per day
 		new Setting(containerEl)
 			.setName("New Cards Per Day")
@@ -571,21 +563,28 @@ class FlashcardsSettingTab extends PluginSettingTab {
 			cls: "setting-item-description",
 		});
 		desc.textContent =
-			"Every .md file in the deck folder is one flashcard. " +
-			"Use optional YAML frontmatter to customise the card:";
+			"Any folder that contains at least one configured markdown file becomes a deck. " +
+			"Use YAML frontmatter to mark/configure cards:";
 
 		const ul = containerEl.createEl("ul");
+		ul.createEl("li", {
+			text: "flashcards: true — marks this file's folder as a flashcard deck.",
+		});
 		ul.createEl("li", {
 			text: "card_front: \"Question text\" — overrides the filename as the front.",
 		});
 		ul.createEl("li", {
 			text: "card_type: basic_reversed — creates two cards (Front→Back and Back→Front).",
 		});
+		ul.createEl("li", {
+			text: "Nested decks are not allowed: if a deck folder has a child deck folder, the plugin will stop and show an error.",
+		});
 
 		containerEl.createEl("h4", { text: "Example" });
 		containerEl.createEl("pre").createEl("code", {
 			text: [
 				"---",
+					"flashcards: true",
 				"card_type: basic_reversed",
 				"card_front: What is the capital of France?",
 				"---",
@@ -607,7 +606,11 @@ export default class FlashcardsPlugin extends Plugin {
 	async onload(): Promise<void> {
 		// Load persisted data
 		const stored = (await this.loadData()) as Partial<PluginStoredData> | null;
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, stored?.settings ?? {});
+		const merged = Object.assign({}, DEFAULT_SETTINGS, stored?.settings ?? {});
+		this.settings = {
+			newCardsPerDay: merged.newCardsPerDay,
+			maxReviewsPerDay: merged.maxReviewsPerDay,
+		};
 		this.cardData = stored?.cards ?? {};
 
 		// Register the study view
@@ -627,24 +630,6 @@ export default class FlashcardsPlugin extends Plugin {
 			name: "Open Flashcard Deck",
 			callback: () => void this.openStudyView(),
 		});
-
-		// Right-click a folder → "Set as Flashcard Deck"
-		this.registerEvent(
-			this.app.workspace.on("file-menu", (menu, file) => {
-				if (file instanceof TFolder) {
-					menu.addItem((item) =>
-						item
-							.setTitle("Set as Flashcard Deck")
-							.setIcon("layers")
-							.onClick(async () => {
-								this.settings.deckFolder = file.path;
-								await this.persistData();
-								new Notice(`Flashcard deck → ${file.path}`);
-							}),
-					);
-				}
-			}),
-		);
 
 		// Settings tab
 		this.addSettingTab(new FlashcardsSettingTab(this.app, this));
@@ -673,5 +658,51 @@ export default class FlashcardsPlugin extends Plugin {
 		const leaf = workspace.getLeaf("tab");
 		await leaf.setViewState({ type: VIEW_TYPE_FLASHCARD, active: true });
 		workspace.revealLeaf(leaf);
+	}
+
+	private isConfiguredFlashcardFile(file: TFile): boolean {
+		if (file.extension !== "md") return false;
+		const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+		if (!fm) return false;
+		return (
+			fm.flashcards === true ||
+			typeof fm.card_type !== "undefined" ||
+			typeof fm.card_front !== "undefined"
+		);
+	}
+
+	private isDescendantFolder(parentPath: string, childPath: string): boolean {
+		if (parentPath === childPath) return false;
+		if (parentPath === "") return childPath !== "";
+		return childPath.startsWith(`${parentPath}/`);
+	}
+
+	discoverDeckFolders(): { decks: TFolder[]; error: string } {
+		const decksByPath = new Map<string, TFolder>();
+		for (const file of this.app.vault.getMarkdownFiles()) {
+			if (!this.isConfiguredFlashcardFile(file)) continue;
+			if (!file.parent) continue;
+			decksByPath.set(file.parent.path, file.parent);
+		}
+
+		const decks = [...decksByPath.values()].sort(
+			(a, b) => a.path.length - b.path.length,
+		);
+
+		for (let i = 0; i < decks.length; i++) {
+			for (let j = i + 1; j < decks.length; j++) {
+				if (this.isDescendantFolder(decks[i].path, decks[j].path)) {
+					const parent = decks[i].path || "/";
+					const child = decks[j].path || "/";
+					return {
+						decks: [],
+						error:
+							`Nested deck folders are not allowed: "${parent}" contains child deck "${child}". Remove one deck marker and retry.`,
+					};
+				}
+			}
+		}
+
+		return { decks, error: "" };
 	}
 }
