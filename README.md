@@ -80,6 +80,8 @@ Deck directories cannot be nested. If `parent/parent.flashcards` exists, then `p
 4. Choose a deck directory.
 5. Choose one configured deck mode.
 6. Review cards with Again/Hard/Good/Easy.
+7. Use the bottom `Card Font` slider in the Flashcards view to set font size for the current deck (saved as that deck's default).
+8. Optionally adjust `Default Card Font Size` in Settings -> Flashcards as a fallback for decks without a saved size.
 
 Quick note creation:
 

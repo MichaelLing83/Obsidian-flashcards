@@ -7,6 +7,7 @@ import {
 	PluginSettingTab,
 	Setting,
 	SuggestModal,
+	TAbstractFile,
 	TFile,
 	TFolder,
 	WorkspaceLeaf,
@@ -76,16 +77,23 @@ interface DeckSelectionResult {
 interface FlashcardsSettings {
 	newCardsPerDay: number;
 	maxReviewsPerDay: number;
+	cardFontSizePx: number;
+	deckFontSizePxByPath: Record<string, number>;
 }
 
 const DEFAULT_SETTINGS: FlashcardsSettings = {
 	newCardsPerDay: 20,
 	maxReviewsPerDay: 100,
+	cardFontSizePx: 22,
+	deckFontSizePxByPath: {},
 };
 
 const DEFAULT_EASE = 2.5;
 const MIN_EASE = 1.3;
 const MS_PER_DAY = 86_400_000;
+const DEBUG_PREFIX = "[Flashcards]";
+const MIN_CARD_FONT_SIZE_PX = 14;
+const MAX_CARD_FONT_SIZE_PX = 48;
 
 /** View type identifier. */
 const VIEW_TYPE_FLASHCARD = "flashcard-study-view";
@@ -178,15 +186,31 @@ function normalizeSectionName(value: unknown): string {
 	return typeof value === "string" ? value.trim() : "";
 }
 
+function extractJsonPayload(raw: string): string {
+	const trimmed = raw.trim();
+
+	const fullFence = trimmed.match(/^```(?:json)?\s*[\r\n]+([\s\S]*?)\r?\n```\s*$/i);
+	if (fullFence) {
+		return fullFence[1].trim();
+	}
+
+	const firstFence = raw.match(/```(?:json)?\s*[\r\n]+([\s\S]*?)\r?\n```/i);
+	if (firstFence) {
+		return firstFence[1].trim();
+	}
+
+	return trimmed;
+}
+
 function parseDeckConfig(raw: string): { config: DeckConfig | null; error: string } {
 	let parsed: unknown;
 	try {
-		parsed = JSON.parse(raw);
+		parsed = JSON.parse(extractJsonPayload(raw));
 	} catch {
 		return {
 			config: null,
 			error:
-				"Invalid config JSON. Use a JSON object with requiredSections and instances.",
+				"Invalid config JSON. Use a JSON object with requiredSections and instances (raw JSON or wrapped in ```json ... ```).",
 		};
 	}
 
@@ -405,6 +429,10 @@ export class FlashcardView extends ItemView {
 		const due: StudyCard[] = [];
 
 		for (const file of files) {
+			if (this.plugin.isDeckConfigFile(file)) {
+				continue;
+			}
+
 			const raw = await this.app.vault.read(file);
 			const sections = parseTopLevelSections(raw);
 
@@ -493,6 +521,7 @@ export class FlashcardView extends ItemView {
 		const el = this.contentEl;
 		el.empty();
 		el.addClass("flashcard-container");
+		this.refreshFontSizeVariable();
 
 		if (this.queueBuildError) {
 			this.renderMessage(
@@ -529,11 +558,29 @@ export class FlashcardView extends ItemView {
 		const wrap = el.createDiv({ cls: "flashcard-state" });
 		wrap.createEl("div", { cls: "flashcard-state-icon", text: title });
 		wrap.createEl("p", { cls: "flashcard-state-body", text: body });
+
+		if (this.activeSelection) {
+			const createBtn = wrap.createEl("button", {
+				cls: "flashcard-btn flashcard-btn-show",
+				text: "New Flashcard",
+			});
+			createBtn.addEventListener("click", () =>
+				void this.createFlashcardInActiveDeck(),
+			);
+		}
+
 		const btn = wrap.createEl("button", {
 			cls: "flashcard-btn flashcard-btn-primary",
 			text: "Refresh",
 		});
 		btn.addEventListener("click", () => void this.startSession());
+
+		this.renderDeckFontSizeControl(el);
+	}
+
+	private async createFlashcardInActiveDeck(): Promise<void> {
+		if (!this.activeSelection) return;
+		await this.plugin.createFlashcardFromDeckFolder(this.activeSelection.deck.folder);
 	}
 
 	private renderComplete(el: HTMLElement): void {
@@ -549,6 +596,8 @@ export class FlashcardView extends ItemView {
 			text: "Start New Session",
 		});
 		btn.addEventListener("click", () => void this.startSession());
+
+		this.renderDeckFontSizeControl(el);
 	}
 
 	private async renderCard(el: HTMLElement): Promise<void> {
@@ -647,6 +696,52 @@ export class FlashcardView extends ItemView {
 				btn.addEventListener("click", () => void this.submitRating(card.id, rating));
 			}
 		}
+
+		this.renderDeckFontSizeControl(el);
+	}
+
+	getActiveDeckPath(): string | null {
+		return this.activeSelection?.deck.folder.path ?? null;
+	}
+
+	refreshFontSizeVariable(): void {
+		const deckPath = this.getActiveDeckPath();
+		const sizePx = this.plugin.getDeckFontSizePx(deckPath);
+		this.contentEl.style.setProperty("--flashcard-font-size", `${sizePx}px`);
+	}
+
+	private renderDeckFontSizeControl(parent: HTMLElement): void {
+		const deckPath = this.getActiveDeckPath();
+		if (!deckPath) return;
+
+		const sizePx = this.plugin.getDeckFontSizePx(deckPath);
+		const wrap = parent.createDiv({ cls: "flashcard-font-control" });
+		wrap.createSpan({ cls: "flashcard-font-control-label", text: "Card Font" });
+
+		const slider = wrap.createEl("input", {
+			type: "range",
+			cls: "flashcard-font-control-slider",
+		});
+		slider.min = String(MIN_CARD_FONT_SIZE_PX);
+		slider.max = String(MAX_CARD_FONT_SIZE_PX);
+		slider.step = "1";
+		slider.value = String(sizePx);
+
+		const valueLabel = wrap.createSpan({
+			cls: "flashcard-font-control-value",
+			text: `${sizePx}px`,
+		});
+
+		slider.addEventListener("input", () => {
+			const current = Number(slider.value);
+			valueLabel.setText(`${current}px`);
+			this.contentEl.style.setProperty("--flashcard-font-size", `${current}px`);
+		});
+
+		slider.addEventListener("change", () => {
+			const current = Number(slider.value);
+			void this.plugin.setDeckFontSizePx(deckPath, current);
+		});
 	}
 
 	private async renderMarkdown(
@@ -722,6 +817,24 @@ class FlashcardsSettingTab extends PluginSettingTab {
 					}),
 			);
 
+		// Card font size
+		new Setting(containerEl)
+			.setName("Default Card Font Size")
+			.setDesc(
+				"Fallback font size for decks that don't have a deck-specific size set in the Flashcards view.",
+			)
+			.addSlider((slider) =>
+				slider
+					.setLimits(MIN_CARD_FONT_SIZE_PX, MAX_CARD_FONT_SIZE_PX, 1)
+					.setValue(this.plugin.settings.cardFontSizePx)
+					.setDynamicTooltip()
+					.onChange(async (value) => {
+						this.plugin.settings.cardFontSizePx = value;
+						this.plugin.applyCardFontSizeToOpenViews();
+						await this.plugin.persistData();
+					}),
+			);
+
 		// Help section
 		containerEl.createEl("h3", { text: "Deck Config File" });
 		const desc = containerEl.createEl("p", {
@@ -782,6 +895,77 @@ export default class FlashcardsPlugin extends Plugin {
 	/** In-memory card records, kept in sync with data.json. */
 	cardData: Record<string, CardRecord> = {};
 
+	private logDebug(message: string, meta?: unknown): void {
+		if (typeof meta === "undefined") {
+			console.info(`${DEBUG_PREFIX} ${message}`);
+			return;
+		}
+		console.info(`${DEBUG_PREFIX} ${message}`, meta);
+	}
+
+	private registerDeckFolderMenuHook(): void {
+		this.registerEvent(
+			this.app.workspace.on("file-menu", (menu, file) => {
+				this.logDebug("file-menu fired", {
+					path: file.path,
+					type: file instanceof TFolder ? "folder" : "file",
+				});
+				this.tryAddNewFlashcardMenuItem(menu, file, "file-menu");
+			}),
+		);
+
+		// Some Obsidian versions use files-menu for navigator context menus.
+		const workspaceAny = this.app.workspace as unknown as {
+			on: (eventName: string, cb: (...args: unknown[]) => void) => unknown;
+		};
+		this.registerEvent(
+			workspaceAny.on("files-menu", (menu: unknown, files: unknown) => {
+				if (!Array.isArray(files)) return;
+				const first = files[0];
+				const cast = first as TAbstractFile | undefined;
+				this.logDebug("files-menu fired", {
+					count: files.length,
+					firstPath: cast?.path,
+					firstType: cast instanceof TFolder ? "folder" : "file",
+				});
+				if (!cast || files.length !== 1) return;
+				this.tryAddNewFlashcardMenuItem(menu, cast, "files-menu");
+			}) as any,
+		);
+	}
+
+	private tryAddNewFlashcardMenuItem(
+		menu: unknown,
+		file: TAbstractFile,
+		sourceEvent: string,
+	): void {
+		if (!(file instanceof TFolder)) {
+			return;
+		}
+
+		const configFile = this.getDeckConfigFileForFolder(file);
+		this.logDebug("folder context detected", {
+			sourceEvent,
+			folder: file.path,
+			configFile: configFile?.path ?? null,
+		});
+
+		const menuAny = menu as any;
+
+		menuAny.addItem((item: any) =>
+			item
+				.setTitle("New Flashcard")
+				.setIcon("plus-circle")
+				.onClick(() => {
+					this.logDebug("New Flashcard clicked", {
+						folder: file.path,
+						configFile: configFile?.path ?? null,
+					});
+					void this.createFlashcardFromDeckFolder(file);
+				}),
+		);
+	}
+
 	async onload(): Promise<void> {
 		// Load persisted data
 		const stored = (await this.loadData()) as Partial<PluginStoredData> | null;
@@ -789,6 +973,25 @@ export default class FlashcardsPlugin extends Plugin {
 		this.settings = {
 			newCardsPerDay: merged.newCardsPerDay,
 			maxReviewsPerDay: merged.maxReviewsPerDay,
+			cardFontSizePx: Math.max(
+				MIN_CARD_FONT_SIZE_PX,
+				Math.min(MAX_CARD_FONT_SIZE_PX, Number(merged.cardFontSizePx) || DEFAULT_SETTINGS.cardFontSizePx),
+			),
+			deckFontSizePxByPath:
+				typeof merged.deckFontSizePxByPath === "object" && merged.deckFontSizePxByPath
+					? Object.fromEntries(
+						Object.entries(merged.deckFontSizePxByPath)
+							.map(([path, size]) => [path, Number(size)])
+							.filter(
+								([path, size]) =>
+									typeof path === "string" &&
+									path.length > 0 &&
+									Number.isFinite(size) &&
+									size >= MIN_CARD_FONT_SIZE_PX &&
+									size <= MAX_CARD_FONT_SIZE_PX,
+							),
+					)
+					: {},
 		};
 		this.cardData = stored?.cards ?? {};
 
@@ -810,21 +1013,9 @@ export default class FlashcardsPlugin extends Plugin {
 			callback: () => void this.openStudyView(),
 		});
 
-		// Right-click deck folder -> New Flashcard
-		this.registerEvent(
-			this.app.workspace.on("file-menu", (menu, file) => {
-				if (!(file instanceof TFolder)) return;
-				const configFile = this.getDeckConfigFileForFolder(file);
-				if (!configFile) return;
-
-				menu.addItem((item) =>
-					item
-						.setTitle("New Flashcard")
-						.setIcon("plus-circle")
-						.onClick(() => void this.createFlashcardFromDeckFolder(file)),
-				);
-			}),
-		);
+		this.logDebug("plugin loaded", { version: this.manifest.version });
+		this.registerDeckFolderMenuHook();
+		this.applyCardFontSizeToOpenViews();
 
 		// Settings tab
 		this.addSettingTab(new FlashcardsSettingTab(this.app, this));
@@ -847,12 +1038,38 @@ export default class FlashcardsPlugin extends Plugin {
 		const { workspace } = this.app;
 		const existing = workspace.getLeavesOfType(VIEW_TYPE_FLASHCARD);
 		if (existing.length > 0) {
+			this.applyCardFontSizeToOpenViews();
 			workspace.revealLeaf(existing[0]);
 			return;
 		}
 		const leaf = workspace.getLeaf("tab");
 		await leaf.setViewState({ type: VIEW_TYPE_FLASHCARD, active: true });
+		this.applyCardFontSizeToOpenViews();
 		workspace.revealLeaf(leaf);
+	}
+
+	applyCardFontSizeToOpenViews(): void {
+		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_FLASHCARD)) {
+			const view = leaf.view;
+			if (view instanceof FlashcardView) {
+				view.refreshFontSizeVariable();
+			}
+		}
+	}
+
+	getDeckFontSizePx(deckPath: string | null | undefined): number {
+		if (!deckPath) return this.settings.cardFontSizePx;
+		return this.settings.deckFontSizePxByPath[deckPath] ?? this.settings.cardFontSizePx;
+	}
+
+	async setDeckFontSizePx(deckPath: string, sizePx: number): Promise<void> {
+		const clamped = Math.max(
+			MIN_CARD_FONT_SIZE_PX,
+			Math.min(MAX_CARD_FONT_SIZE_PX, Math.round(sizePx)),
+		);
+		this.settings.deckFontSizePxByPath[deckPath] = clamped;
+		this.applyCardFontSizeToOpenViews();
+		await this.persistData();
 	}
 
 	buildCardId(instanceKey: string, notePath: string): string {
@@ -874,25 +1091,25 @@ export default class FlashcardsPlugin extends Plugin {
 	}
 
 	private isDeckConfigFileName(fileName: string, folderName: string): boolean {
+		const lowerName = fileName.toLowerCase();
+		const lowerFolder = folderName.toLowerCase();
 		return (
-			fileName === `${folderName}.flashcards` ||
-			fileName === `${folderName}.flashcards.md`
+			lowerName === `${lowerFolder}.flashcards` ||
+			lowerName === `${lowerFolder}.flashcards.md`
 		);
 	}
 
-	private isDeckConfigFile(file: TFile): boolean {
+	isDeckConfigFile(file: TFile): boolean {
 		if (!file.parent) return false;
 		return this.isDeckConfigFileName(file.name, file.parent.name);
 	}
 
 	private getDeckConfigFileForFolder(folder: TFolder): TFile | null {
-		const candidates = [
-			`${folder.path}/${folder.name}.flashcards`,
-			`${folder.path}/${folder.name}.flashcards.md`,
-		];
-		for (const cfgPath of candidates) {
-			const cfg = this.app.vault.getAbstractFileByPath(cfgPath);
-			if (cfg instanceof TFile) return cfg;
+		for (const child of folder.children) {
+			if (!(child instanceof TFile)) continue;
+			if (this.isDeckConfigFileName(child.name, folder.name)) {
+				return child;
+			}
 		}
 		return null;
 	}
@@ -944,7 +1161,7 @@ export default class FlashcardsPlugin extends Plugin {
 		return candidate;
 	}
 
-	private async createFlashcardFromDeckFolder(folder: TFolder): Promise<void> {
+	async createFlashcardFromDeckFolder(folder: TFolder): Promise<void> {
 		const deckResult = await this.getDeckDefinitionForFolder(folder);
 		if (!deckResult.deck) {
 			new Notice(deckResult.error);

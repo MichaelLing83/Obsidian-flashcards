@@ -32,11 +32,16 @@ module.exports = __toCommonJS(main_exports);
 var import_obsidian = require("obsidian");
 var DEFAULT_SETTINGS = {
   newCardsPerDay: 20,
-  maxReviewsPerDay: 100
+  maxReviewsPerDay: 100,
+  cardFontSizePx: 22,
+  deckFontSizePxByPath: {}
 };
 var DEFAULT_EASE = 2.5;
 var MIN_EASE = 1.3;
 var MS_PER_DAY = 864e5;
+var DEBUG_PREFIX = "[Flashcards]";
+var MIN_CARD_FONT_SIZE_PX = 14;
+var MAX_CARD_FONT_SIZE_PX = 48;
 var VIEW_TYPE_FLASHCARD = "flashcard-study-view";
 var QUALITY = [1, 3, 4, 5];
 function nextInterval(rating, rec) {
@@ -96,14 +101,26 @@ function parseTopLevelSections(markdown) {
 function normalizeSectionName(value) {
   return typeof value === "string" ? value.trim() : "";
 }
+function extractJsonPayload(raw) {
+  const trimmed = raw.trim();
+  const fullFence = trimmed.match(/^```(?:json)?\s*[\r\n]+([\s\S]*?)\r?\n```\s*$/i);
+  if (fullFence) {
+    return fullFence[1].trim();
+  }
+  const firstFence = raw.match(/```(?:json)?\s*[\r\n]+([\s\S]*?)\r?\n```/i);
+  if (firstFence) {
+    return firstFence[1].trim();
+  }
+  return trimmed;
+}
 function parseDeckConfig(raw) {
   let parsed;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(extractJsonPayload(raw));
   } catch (e) {
     return {
       config: null,
-      error: "Invalid config JSON. Use a JSON object with requiredSections and instances."
+      error: "Invalid config JSON. Use a JSON object with requiredSections and instances (raw JSON or wrapped in ```json ... ```)."
     };
   }
   if (!parsed || typeof parsed !== "object") {
@@ -257,6 +274,9 @@ var FlashcardView = class extends import_obsidian.ItemView {
     const now = Date.now();
     const due = [];
     for (const file of files) {
+      if (this.plugin.isDeckConfigFile(file)) {
+        continue;
+      }
       const raw = await this.app.vault.read(file);
       const sections = parseTopLevelSections(raw);
       for (const required of selection.deck.config.requiredSections) {
@@ -319,6 +339,7 @@ var FlashcardView = class extends import_obsidian.ItemView {
     const el = this.contentEl;
     el.empty();
     el.addClass("flashcard-container");
+    this.refreshFontSizeVariable();
     if (this.queueBuildError) {
       this.renderMessage(
         el,
@@ -345,11 +366,26 @@ var FlashcardView = class extends import_obsidian.ItemView {
     const wrap = el.createDiv({ cls: "flashcard-state" });
     wrap.createEl("div", { cls: "flashcard-state-icon", text: title });
     wrap.createEl("p", { cls: "flashcard-state-body", text: body });
+    if (this.activeSelection) {
+      const createBtn = wrap.createEl("button", {
+        cls: "flashcard-btn flashcard-btn-show",
+        text: "New Flashcard"
+      });
+      createBtn.addEventListener(
+        "click",
+        () => void this.createFlashcardInActiveDeck()
+      );
+    }
     const btn = wrap.createEl("button", {
       cls: "flashcard-btn flashcard-btn-primary",
       text: "Refresh"
     });
     btn.addEventListener("click", () => void this.startSession());
+    this.renderDeckFontSizeControl(el);
+  }
+  async createFlashcardInActiveDeck() {
+    if (!this.activeSelection) return;
+    await this.plugin.createFlashcardFromDeckFolder(this.activeSelection.deck.folder);
   }
   renderComplete(el) {
     const wrap = el.createDiv({ cls: "flashcard-state" });
@@ -364,6 +400,7 @@ var FlashcardView = class extends import_obsidian.ItemView {
       text: "Start New Session"
     });
     btn.addEventListener("click", () => void this.startSession());
+    this.renderDeckFontSizeControl(el);
   }
   async renderCard(el) {
     var _a, _b, _c, _d;
@@ -444,6 +481,44 @@ var FlashcardView = class extends import_obsidian.ItemView {
         btn.addEventListener("click", () => void this.submitRating(card.id, rating));
       }
     }
+    this.renderDeckFontSizeControl(el);
+  }
+  getActiveDeckPath() {
+    var _a, _b;
+    return (_b = (_a = this.activeSelection) == null ? void 0 : _a.deck.folder.path) != null ? _b : null;
+  }
+  refreshFontSizeVariable() {
+    const deckPath = this.getActiveDeckPath();
+    const sizePx = this.plugin.getDeckFontSizePx(deckPath);
+    this.contentEl.style.setProperty("--flashcard-font-size", `${sizePx}px`);
+  }
+  renderDeckFontSizeControl(parent) {
+    const deckPath = this.getActiveDeckPath();
+    if (!deckPath) return;
+    const sizePx = this.plugin.getDeckFontSizePx(deckPath);
+    const wrap = parent.createDiv({ cls: "flashcard-font-control" });
+    wrap.createSpan({ cls: "flashcard-font-control-label", text: "Card Font" });
+    const slider = wrap.createEl("input", {
+      type: "range",
+      cls: "flashcard-font-control-slider"
+    });
+    slider.min = String(MIN_CARD_FONT_SIZE_PX);
+    slider.max = String(MAX_CARD_FONT_SIZE_PX);
+    slider.step = "1";
+    slider.value = String(sizePx);
+    const valueLabel = wrap.createSpan({
+      cls: "flashcard-font-control-value",
+      text: `${sizePx}px`
+    });
+    slider.addEventListener("input", () => {
+      const current = Number(slider.value);
+      valueLabel.setText(`${current}px`);
+      this.contentEl.style.setProperty("--flashcard-font-size", `${current}px`);
+    });
+    slider.addEventListener("change", () => {
+      const current = Number(slider.value);
+      void this.plugin.setDeckFontSizePx(deckPath, current);
+    });
   }
   async renderMarkdown(markdown, el, sourcePath) {
     try {
@@ -482,6 +557,15 @@ var FlashcardsSettingTab = class extends import_obsidian.PluginSettingTab {
     new import_obsidian.Setting(containerEl).setName("Max Reviews Per Day").setDesc("Maximum number of due review cards shown per session.").addSlider(
       (slider) => slider.setLimits(1, 500, 1).setValue(this.plugin.settings.maxReviewsPerDay).setDynamicTooltip().onChange(async (value) => {
         this.plugin.settings.maxReviewsPerDay = value;
+        await this.plugin.persistData();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Default Card Font Size").setDesc(
+      "Fallback font size for decks that don't have a deck-specific size set in the Flashcards view."
+    ).addSlider(
+      (slider) => slider.setLimits(MIN_CARD_FONT_SIZE_PX, MAX_CARD_FONT_SIZE_PX, 1).setValue(this.plugin.settings.cardFontSizePx).setDynamicTooltip().onChange(async (value) => {
+        this.plugin.settings.cardFontSizePx = value;
+        this.plugin.applyCardFontSizeToOpenViews();
         await this.plugin.persistData();
       })
     );
@@ -537,13 +621,78 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
     /** In-memory card records, kept in sync with data.json. */
     this.cardData = {};
   }
+  logDebug(message, meta) {
+    if (typeof meta === "undefined") {
+      console.info(`${DEBUG_PREFIX} ${message}`);
+      return;
+    }
+    console.info(`${DEBUG_PREFIX} ${message}`, meta);
+  }
+  registerDeckFolderMenuHook() {
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu, file) => {
+        this.logDebug("file-menu fired", {
+          path: file.path,
+          type: file instanceof import_obsidian.TFolder ? "folder" : "file"
+        });
+        this.tryAddNewFlashcardMenuItem(menu, file, "file-menu");
+      })
+    );
+    const workspaceAny = this.app.workspace;
+    this.registerEvent(
+      workspaceAny.on("files-menu", (menu, files) => {
+        if (!Array.isArray(files)) return;
+        const first = files[0];
+        const cast = first;
+        this.logDebug("files-menu fired", {
+          count: files.length,
+          firstPath: cast == null ? void 0 : cast.path,
+          firstType: cast instanceof import_obsidian.TFolder ? "folder" : "file"
+        });
+        if (!cast || files.length !== 1) return;
+        this.tryAddNewFlashcardMenuItem(menu, cast, "files-menu");
+      })
+    );
+  }
+  tryAddNewFlashcardMenuItem(menu, file, sourceEvent) {
+    var _a;
+    if (!(file instanceof import_obsidian.TFolder)) {
+      return;
+    }
+    const configFile = this.getDeckConfigFileForFolder(file);
+    this.logDebug("folder context detected", {
+      sourceEvent,
+      folder: file.path,
+      configFile: (_a = configFile == null ? void 0 : configFile.path) != null ? _a : null
+    });
+    const menuAny = menu;
+    menuAny.addItem(
+      (item) => item.setTitle("New Flashcard").setIcon("plus-circle").onClick(() => {
+        var _a2;
+        this.logDebug("New Flashcard clicked", {
+          folder: file.path,
+          configFile: (_a2 = configFile == null ? void 0 : configFile.path) != null ? _a2 : null
+        });
+        void this.createFlashcardFromDeckFolder(file);
+      })
+    );
+  }
   async onload() {
     var _a, _b;
     const stored = await this.loadData();
     const merged = Object.assign({}, DEFAULT_SETTINGS, (_a = stored == null ? void 0 : stored.settings) != null ? _a : {});
     this.settings = {
       newCardsPerDay: merged.newCardsPerDay,
-      maxReviewsPerDay: merged.maxReviewsPerDay
+      maxReviewsPerDay: merged.maxReviewsPerDay,
+      cardFontSizePx: Math.max(
+        MIN_CARD_FONT_SIZE_PX,
+        Math.min(MAX_CARD_FONT_SIZE_PX, Number(merged.cardFontSizePx) || DEFAULT_SETTINGS.cardFontSizePx)
+      ),
+      deckFontSizePxByPath: typeof merged.deckFontSizePxByPath === "object" && merged.deckFontSizePxByPath ? Object.fromEntries(
+        Object.entries(merged.deckFontSizePxByPath).map(([path, size]) => [path, Number(size)]).filter(
+          ([path, size]) => typeof path === "string" && path.length > 0 && Number.isFinite(size) && size >= MIN_CARD_FONT_SIZE_PX && size <= MAX_CARD_FONT_SIZE_PX
+        )
+      ) : {}
     };
     this.cardData = (_b = stored == null ? void 0 : stored.cards) != null ? _b : {};
     this.registerView(
@@ -560,16 +709,9 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
       name: "Open Flashcard Deck",
       callback: () => void this.openStudyView()
     });
-    this.registerEvent(
-      this.app.workspace.on("file-menu", (menu, file) => {
-        if (!(file instanceof import_obsidian.TFolder)) return;
-        const configFile = this.getDeckConfigFileForFolder(file);
-        if (!configFile) return;
-        menu.addItem(
-          (item) => item.setTitle("New Flashcard").setIcon("plus-circle").onClick(() => void this.createFlashcardFromDeckFolder(file))
-        );
-      })
-    );
+    this.logDebug("plugin loaded", { version: this.manifest.version });
+    this.registerDeckFolderMenuHook();
+    this.applyCardFontSizeToOpenViews();
     this.addSettingTab(new FlashcardsSettingTab(this.app, this));
   }
   onunload() {
@@ -587,12 +729,36 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
     const { workspace } = this.app;
     const existing = workspace.getLeavesOfType(VIEW_TYPE_FLASHCARD);
     if (existing.length > 0) {
+      this.applyCardFontSizeToOpenViews();
       workspace.revealLeaf(existing[0]);
       return;
     }
     const leaf = workspace.getLeaf("tab");
     await leaf.setViewState({ type: VIEW_TYPE_FLASHCARD, active: true });
+    this.applyCardFontSizeToOpenViews();
     workspace.revealLeaf(leaf);
+  }
+  applyCardFontSizeToOpenViews() {
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_FLASHCARD)) {
+      const view = leaf.view;
+      if (view instanceof FlashcardView) {
+        view.refreshFontSizeVariable();
+      }
+    }
+  }
+  getDeckFontSizePx(deckPath) {
+    var _a;
+    if (!deckPath) return this.settings.cardFontSizePx;
+    return (_a = this.settings.deckFontSizePxByPath[deckPath]) != null ? _a : this.settings.cardFontSizePx;
+  }
+  async setDeckFontSizePx(deckPath, sizePx) {
+    const clamped = Math.max(
+      MIN_CARD_FONT_SIZE_PX,
+      Math.min(MAX_CARD_FONT_SIZE_PX, Math.round(sizePx))
+    );
+    this.settings.deckFontSizePxByPath[deckPath] = clamped;
+    this.applyCardFontSizeToOpenViews();
+    await this.persistData();
   }
   buildCardId(instanceKey, notePath) {
     return `${instanceKey}::${notePath}`;
@@ -609,20 +775,20 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
     return `${deckPath}::${instance.promptSection}->${instance.answerSection}`;
   }
   isDeckConfigFileName(fileName, folderName) {
-    return fileName === `${folderName}.flashcards` || fileName === `${folderName}.flashcards.md`;
+    const lowerName = fileName.toLowerCase();
+    const lowerFolder = folderName.toLowerCase();
+    return lowerName === `${lowerFolder}.flashcards` || lowerName === `${lowerFolder}.flashcards.md`;
   }
   isDeckConfigFile(file) {
     if (!file.parent) return false;
     return this.isDeckConfigFileName(file.name, file.parent.name);
   }
   getDeckConfigFileForFolder(folder) {
-    const candidates = [
-      `${folder.path}/${folder.name}.flashcards`,
-      `${folder.path}/${folder.name}.flashcards.md`
-    ];
-    for (const cfgPath of candidates) {
-      const cfg = this.app.vault.getAbstractFileByPath(cfgPath);
-      if (cfg instanceof import_obsidian.TFile) return cfg;
+    for (const child of folder.children) {
+      if (!(child instanceof import_obsidian.TFile)) continue;
+      if (this.isDeckConfigFileName(child.name, folder.name)) {
+        return child;
+      }
     }
     return null;
   }
