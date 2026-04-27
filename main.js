@@ -324,14 +324,16 @@ var SelectionModal = class extends import_obsidian.SuggestModal {
     this.onChoose(item);
   }
 };
-var FlashcardView = class extends import_obsidian.ItemView {
+var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.queue = [];
     this.idx = 0;
     this.revealed = false;
     this.queueBuildError = "";
+    this.queueBuildErrorFilePath = "";
     this.activeSelection = null;
+    this.keydownRegistered = false;
     this.plugin = plugin;
   }
   getViewType() {
@@ -344,11 +346,64 @@ var FlashcardView = class extends import_obsidian.ItemView {
     return "brain";
   }
   async onOpen() {
+    this.registerKeyboardShortcuts();
     await this.startSession();
+  }
+  registerKeyboardShortcuts() {
+    if (this.keydownRegistered) return;
+    this.keydownRegistered = true;
+    this.registerDomEvent(document, "keydown", (evt) => {
+      if (!this.isActiveView()) return;
+      if (this.shouldIgnoreShortcut(evt.target)) return;
+      if (evt.code === "Space" && !this.revealed && this.canOperateOnCurrentCard()) {
+        evt.preventDefault();
+        this.revealed = true;
+        this.render();
+        return;
+      }
+      if (!this.revealed || !this.canOperateOnCurrentCard()) return;
+      const rating = this.keyToRating(evt);
+      if (rating === null) return;
+      evt.preventDefault();
+      const card = this.queue[this.idx];
+      void this.submitRating(card.id, rating);
+    });
+  }
+  isActiveView() {
+    const active = this.app.workspace.getActiveViewOfType(_FlashcardView);
+    return active === this;
+  }
+  shouldIgnoreShortcut(target) {
+    if (!(target instanceof HTMLElement)) return false;
+    if (target.isContentEditable) return true;
+    const tag = target.tagName;
+    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+  }
+  canOperateOnCurrentCard() {
+    return !this.queueBuildError && this.queue.length > 0 && this.idx < this.queue.length;
+  }
+  keyToRating(evt) {
+    switch (evt.code) {
+      case "Digit1":
+      case "Numpad1":
+        return 0;
+      case "Digit2":
+      case "Numpad2":
+        return 1;
+      case "Digit3":
+      case "Numpad3":
+        return 2;
+      case "Digit4":
+      case "Numpad4":
+        return 3;
+      default:
+        return null;
+    }
   }
   /** (Re-)build the study queue and render the first card. */
   async startSession() {
     this.queueBuildError = "";
+    this.queueBuildErrorFilePath = "";
     this.activeSelection = null;
     const selected = await this.plugin.selectDeckInstanceForReview();
     if (selected.error) {
@@ -392,7 +447,8 @@ var FlashcardView = class extends import_obsidian.ItemView {
       const sections = parseTopLevelSections(raw);
       for (const required of selection.deck.config.requiredSections) {
         if (!sections.has(required)) {
-          this.queueBuildError = `Missing required section "${required}" in ${file.path}. Every flashcard note in this deck must include all required sections.`;
+          this.queueBuildError = `Missing required section "${required}". Every flashcard note in this deck must include all required sections.`;
+          this.queueBuildErrorFilePath = file.path;
           this.queue = [];
           return;
         }
@@ -400,7 +456,8 @@ var FlashcardView = class extends import_obsidian.ItemView {
       const front = (_b = (_a = sections.get(selection.instance.promptSection)) == null ? void 0 : _a.trim()) != null ? _b : "";
       const back = (_d = (_c = sections.get(selection.instance.answerSection)) == null ? void 0 : _c.trim()) != null ? _d : "";
       if (!front || !back) {
-        this.queueBuildError = `Cannot build card from ${file.path}: section "${selection.instance.promptSection}" or "${selection.instance.answerSection}" is empty.`;
+        this.queueBuildError = `Cannot build card: section "${selection.instance.promptSection}" or "${selection.instance.answerSection}" is empty.`;
+        this.queueBuildErrorFilePath = file.path;
         this.queue = [];
         return;
       }
@@ -477,6 +534,17 @@ var FlashcardView = class extends import_obsidian.ItemView {
     const wrap = el.createDiv({ cls: "flashcard-state" });
     wrap.createEl("div", { cls: "flashcard-state-icon", text: title });
     wrap.createEl("p", { cls: "flashcard-state-body", text: body });
+    if (this.queueBuildErrorFilePath) {
+      const link = wrap.createEl("a", {
+        cls: "flashcard-error-link",
+        text: `Open note: ${this.queueBuildErrorFilePath}`
+      });
+      link.href = "#";
+      link.addEventListener("click", (evt) => {
+        evt.preventDefault();
+        void this.openQueueErrorFile();
+      });
+    }
     if (this.activeSelection) {
       const createBtn = wrap.createEl("button", {
         cls: "flashcard-btn flashcard-btn-show",
@@ -497,6 +565,17 @@ var FlashcardView = class extends import_obsidian.ItemView {
   async createFlashcardInActiveDeck() {
     if (!this.activeSelection) return;
     await this.plugin.createFlashcardFromDeckFolder(this.activeSelection.deck.folder);
+  }
+  async openQueueErrorFile() {
+    if (!this.queueBuildErrorFilePath) return;
+    const target = this.app.vault.getAbstractFileByPath(this.queueBuildErrorFilePath);
+    if (!(target instanceof import_obsidian.TFile)) {
+      new import_obsidian.Notice(`Could not find note: ${this.queueBuildErrorFilePath}`);
+      return;
+    }
+    const leaf = this.app.workspace.getLeaf("tab");
+    await leaf.openFile(target);
+    this.app.workspace.revealLeaf(leaf);
   }
   renderComplete(el) {
     const wrap = el.createDiv({ cls: "flashcard-state" });

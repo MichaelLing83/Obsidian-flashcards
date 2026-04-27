@@ -513,7 +513,9 @@ export class FlashcardView extends ItemView {
 	private idx = 0;
 	private revealed = false;
 	private queueBuildError = "";
+	private queueBuildErrorFilePath = "";
 	private activeSelection: DeckInstanceSelection | null = null;
+	private keydownRegistered = false;
 
 	constructor(leaf: WorkspaceLeaf, plugin: FlashcardsPlugin) {
 		super(leaf);
@@ -531,12 +533,75 @@ export class FlashcardView extends ItemView {
 	}
 
 	async onOpen(): Promise<void> {
+		this.registerKeyboardShortcuts();
 		await this.startSession();
+	}
+
+	private registerKeyboardShortcuts(): void {
+		if (this.keydownRegistered) return;
+		this.keydownRegistered = true;
+
+		this.registerDomEvent(document, "keydown", (evt: KeyboardEvent) => {
+			if (!this.isActiveView()) return;
+			if (this.shouldIgnoreShortcut(evt.target)) return;
+
+			if (evt.code === "Space" && !this.revealed && this.canOperateOnCurrentCard()) {
+				evt.preventDefault();
+				this.revealed = true;
+				this.render();
+				return;
+			}
+
+			if (!this.revealed || !this.canOperateOnCurrentCard()) return;
+
+			const rating = this.keyToRating(evt);
+			if (rating === null) return;
+
+			evt.preventDefault();
+			const card = this.queue[this.idx];
+			void this.submitRating(card.id, rating);
+		});
+	}
+
+	private isActiveView(): boolean {
+		const active = this.app.workspace.getActiveViewOfType(FlashcardView);
+		return active === this;
+	}
+
+	private shouldIgnoreShortcut(target: EventTarget | null): boolean {
+		if (!(target instanceof HTMLElement)) return false;
+		if (target.isContentEditable) return true;
+		const tag = target.tagName;
+		return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+	}
+
+	private canOperateOnCurrentCard(): boolean {
+		return !this.queueBuildError && this.queue.length > 0 && this.idx < this.queue.length;
+	}
+
+	private keyToRating(evt: KeyboardEvent): Rating | null {
+		switch (evt.code) {
+			case "Digit1":
+			case "Numpad1":
+				return 0;
+			case "Digit2":
+			case "Numpad2":
+				return 1;
+			case "Digit3":
+			case "Numpad3":
+				return 2;
+			case "Digit4":
+			case "Numpad4":
+				return 3;
+			default:
+				return null;
+		}
 	}
 
 	/** (Re-)build the study queue and render the first card. */
 	async startSession(): Promise<void> {
 		this.queueBuildError = "";
+		this.queueBuildErrorFilePath = "";
 		this.activeSelection = null;
 		const selected = await this.plugin.selectDeckInstanceForReview();
 		if (selected.error) {
@@ -588,8 +653,9 @@ export class FlashcardView extends ItemView {
 			for (const required of selection.deck.config.requiredSections) {
 				if (!sections.has(required)) {
 					this.queueBuildError =
-						`Missing required section \"${required}\" in ${file.path}. ` +
+						`Missing required section \"${required}\". ` +
 						"Every flashcard note in this deck must include all required sections.";
+					this.queueBuildErrorFilePath = file.path;
 					this.queue = [];
 					return;
 				}
@@ -599,8 +665,9 @@ export class FlashcardView extends ItemView {
 			const back = sections.get(selection.instance.answerSection)?.trim() ?? "";
 			if (!front || !back) {
 				this.queueBuildError =
-					`Cannot build card from ${file.path}: ` +
+					"Cannot build card: " +
 					`section \"${selection.instance.promptSection}\" or \"${selection.instance.answerSection}\" is empty.`;
+				this.queueBuildErrorFilePath = file.path;
 				this.queue = [];
 				return;
 			}
@@ -708,6 +775,18 @@ export class FlashcardView extends ItemView {
 		wrap.createEl("div", { cls: "flashcard-state-icon", text: title });
 		wrap.createEl("p", { cls: "flashcard-state-body", text: body });
 
+		if (this.queueBuildErrorFilePath) {
+			const link = wrap.createEl("a", {
+				cls: "flashcard-error-link",
+				text: `Open note: ${this.queueBuildErrorFilePath}`,
+			});
+			link.href = "#";
+			link.addEventListener("click", (evt) => {
+				evt.preventDefault();
+				void this.openQueueErrorFile();
+			});
+		}
+
 		if (this.activeSelection) {
 			const createBtn = wrap.createEl("button", {
 				cls: "flashcard-btn flashcard-btn-show",
@@ -730,6 +809,19 @@ export class FlashcardView extends ItemView {
 	private async createFlashcardInActiveDeck(): Promise<void> {
 		if (!this.activeSelection) return;
 		await this.plugin.createFlashcardFromDeckFolder(this.activeSelection.deck.folder);
+	}
+
+	private async openQueueErrorFile(): Promise<void> {
+		if (!this.queueBuildErrorFilePath) return;
+		const target = this.app.vault.getAbstractFileByPath(this.queueBuildErrorFilePath);
+		if (!(target instanceof TFile)) {
+			new Notice(`Could not find note: ${this.queueBuildErrorFilePath}`);
+			return;
+		}
+
+		const leaf = this.app.workspace.getLeaf("tab");
+		await leaf.openFile(target);
+		this.app.workspace.revealLeaf(leaf);
 	}
 
 	private renderComplete(el: HTMLElement): void {
