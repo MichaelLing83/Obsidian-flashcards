@@ -60,9 +60,10 @@ interface DeckConfig {
 }
 
 interface DeckAiConfig {
-	provider: "ollama";
+	provider: "ollama" | "volcengine";
 	model: string;
 	baseUrl?: string;
+	apiKey?: string;
 	prompts: Record<string, Record<string, string>>;
 }
 
@@ -104,6 +105,7 @@ const DEBUG_PREFIX = "[Flashcards]";
 const MIN_CARD_FONT_SIZE_PX = 14;
 const MAX_CARD_FONT_SIZE_PX = 48;
 const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
+const DEFAULT_VOLCENGINE_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
 
 /** View type identifier. */
 const VIEW_TYPE_FLASHCARD = "flashcard-study-view";
@@ -317,13 +319,14 @@ function parseDeckConfig(raw: string): { config: DeckConfig | null; error: strin
 			provider?: unknown;
 			model?: unknown;
 			baseUrl?: unknown;
+			apiKey?: unknown;
 			prompts?: unknown;
 		};
 
-		if (aiObj.provider !== "ollama") {
+		if (aiObj.provider !== "ollama" && aiObj.provider !== "volcengine") {
 			return {
 				config: null,
-				error: "ai.provider must be \"ollama\".",
+				error: "ai.provider must be \"ollama\" or \"volcengine\".",
 			};
 		}
 
@@ -335,7 +338,20 @@ function parseDeckConfig(raw: string): { config: DeckConfig | null; error: strin
 			};
 		}
 
-		const baseUrl = normalizeSectionName(aiObj.baseUrl) || DEFAULT_OLLAMA_BASE_URL;
+		const baseUrl =
+			normalizeSectionName(aiObj.baseUrl) ||
+			(aiObj.provider === "volcengine"
+				? DEFAULT_VOLCENGINE_BASE_URL
+				: DEFAULT_OLLAMA_BASE_URL);
+		const apiKey = normalizeSectionName(aiObj.apiKey) || undefined;
+
+		if (aiObj.provider === "volcengine" && !apiKey) {
+			return {
+				config: null,
+				error: "ai.apiKey must be a non-empty string when ai.provider is \"volcengine\".",
+			};
+		}
+
 		if (!aiObj.prompts || typeof aiObj.prompts !== "object" || Array.isArray(aiObj.prompts)) {
 			return {
 				config: null,
@@ -386,9 +402,10 @@ function parseDeckConfig(raw: string): { config: DeckConfig | null; error: strin
 		}
 
 		ai = {
-			provider: "ollama",
+			provider: aiObj.provider,
 			model,
 			baseUrl,
+			apiKey,
 			prompts,
 		};
 	}
@@ -1390,6 +1407,65 @@ export default class FlashcardsPlugin extends Plugin {
 		return output;
 	}
 
+	private async generateWithVolcEngine(ai: DeckAiConfig, prompt: string): Promise<string> {
+		const baseUrl = (ai.baseUrl || DEFAULT_VOLCENGINE_BASE_URL).replace(/\/$/, "");
+		if (!ai.apiKey) {
+			throw new Error("VolcEngine API key is missing.");
+		}
+
+		const response = await fetch(`${baseUrl}/chat/completions`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${ai.apiKey}`,
+			},
+			body: JSON.stringify({
+				model: ai.model,
+				messages: [
+					{
+						role: "user",
+						content: prompt,
+					},
+				],
+			}),
+		});
+
+		if (!response.ok) {
+			const errorText = await response.text();
+			throw new Error(
+				`VolcEngine request failed with status ${response.status}${errorText ? `: ${errorText}` : ""}`,
+			);
+		}
+
+		const payload = (await response.json()) as {
+			choices?: Array<{
+				message?: {
+					content?: unknown;
+				};
+			}>;
+		};
+		const output =
+			typeof payload.choices?.[0]?.message?.content === "string"
+				? payload.choices[0].message.content.trim()
+				: "";
+		if (!output) {
+			throw new Error("VolcEngine returned empty content.");
+		}
+
+		return output;
+	}
+
+	private async generateAiOutput(ai: DeckAiConfig, prompt: string): Promise<string> {
+		switch (ai.provider) {
+			case "ollama":
+				return this.generateWithOllama(ai, prompt);
+			case "volcengine":
+				return this.generateWithVolcEngine(ai, prompt);
+			default:
+				throw new Error(`Unsupported AI provider: ${(ai as DeckAiConfig).provider}`);
+		}
+	}
+
 	private findAiCompletionPlan(
 		deck: DeckDefinition,
 		sections: Map<string, string>,
@@ -1475,7 +1551,7 @@ export default class FlashcardsPlugin extends Plugin {
 		new Notice(`AI completing ${plan.targetSection} from ${plan.sourceSection}...`);
 
 		try {
-			const output = await this.generateWithOllama(plan.aI, prompt);
+			const output = await this.generateAiOutput(plan.aI, prompt);
 			const updated = replaceTopLevelSectionContent(raw, plan.targetSection, output);
 			if (!updated.updated) {
 				new Notice(`Could not locate section ${plan.targetSection} in the current note.`);

@@ -121,6 +121,34 @@ AI completion while editing:
 - It then looks for the first empty required section that has an `ai.prompts[source][target]` mapping.
 - The note content plus that configured prompt suffix is sent to local Ollama, and the returned text is written into the target section.
 
+Volcano Engine example:
+
+```json
+{
+  "requiredSections": ["Swedish", "Chinese"],
+  "instances": [
+    ["Swedish", "Chinese"]
+  ],
+  "ai": {
+    "provider": "volcengine",
+    "model": "ep-20250427000000-xxxx",
+    "baseUrl": "https://ark.cn-beijing.volces.com/api/v3",
+    "apiKey": "YOUR_VOLCENGINE_API_KEY",
+    "prompts": {
+      "Swedish": {
+        "Chinese": "Translate the Swedish text above into natural Chinese. Output only the Chinese section content."
+      }
+    }
+  }
+}
+```
+
+Notes:
+
+- `provider` supports `ollama` and `volcengine`.
+- `volcengine` uses the OpenAI-compatible `chat/completions` interface.
+- `apiKey` is required for `volcengine`.
+
 ## Development
 
 ```bash

@@ -43,6 +43,7 @@ var DEBUG_PREFIX = "[Flashcards]";
 var MIN_CARD_FONT_SIZE_PX = 14;
 var MAX_CARD_FONT_SIZE_PX = 48;
 var DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
+var DEFAULT_VOLCENGINE_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
 var VIEW_TYPE_FLASHCARD = "flashcard-study-view";
 var QUALITY = [1, 3, 4, 5];
 function nextInterval(rating, rec) {
@@ -189,10 +190,10 @@ function parseDeckConfig(raw) {
       };
     }
     const aiObj = obj.ai;
-    if (aiObj.provider !== "ollama") {
+    if (aiObj.provider !== "ollama" && aiObj.provider !== "volcengine") {
       return {
         config: null,
-        error: 'ai.provider must be "ollama".'
+        error: 'ai.provider must be "ollama" or "volcengine".'
       };
     }
     const model = normalizeSectionName(aiObj.model);
@@ -202,7 +203,14 @@ function parseDeckConfig(raw) {
         error: "ai.model must be a non-empty string."
       };
     }
-    const baseUrl = normalizeSectionName(aiObj.baseUrl) || DEFAULT_OLLAMA_BASE_URL;
+    const baseUrl = normalizeSectionName(aiObj.baseUrl) || (aiObj.provider === "volcengine" ? DEFAULT_VOLCENGINE_BASE_URL : DEFAULT_OLLAMA_BASE_URL);
+    const apiKey = normalizeSectionName(aiObj.apiKey) || void 0;
+    if (aiObj.provider === "volcengine" && !apiKey) {
+      return {
+        config: null,
+        error: 'ai.apiKey must be a non-empty string when ai.provider is "volcengine".'
+      };
+    }
     if (!aiObj.prompts || typeof aiObj.prompts !== "object" || Array.isArray(aiObj.prompts)) {
       return {
         config: null,
@@ -245,9 +253,10 @@ function parseDeckConfig(raw) {
       prompts[source] = targetMap;
     }
     ai = {
-      provider: "ollama",
+      provider: aiObj.provider,
       model,
       baseUrl,
+      apiKey,
       prompts
     };
   }
@@ -1010,6 +1019,51 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
     }
     return output;
   }
+  async generateWithVolcEngine(ai, prompt) {
+    var _a, _b, _c;
+    const baseUrl = (ai.baseUrl || DEFAULT_VOLCENGINE_BASE_URL).replace(/\/$/, "");
+    if (!ai.apiKey) {
+      throw new Error("VolcEngine API key is missing.");
+    }
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${ai.apiKey}`
+      },
+      body: JSON.stringify({
+        model: ai.model,
+        messages: [
+          {
+            role: "user",
+            content: prompt
+          }
+        ]
+      })
+    });
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(
+        `VolcEngine request failed with status ${response.status}${errorText ? `: ${errorText}` : ""}`
+      );
+    }
+    const payload = await response.json();
+    const output = typeof ((_c = (_b = (_a = payload.choices) == null ? void 0 : _a[0]) == null ? void 0 : _b.message) == null ? void 0 : _c.content) === "string" ? payload.choices[0].message.content.trim() : "";
+    if (!output) {
+      throw new Error("VolcEngine returned empty content.");
+    }
+    return output;
+  }
+  async generateAiOutput(ai, prompt) {
+    switch (ai.provider) {
+      case "ollama":
+        return this.generateWithOllama(ai, prompt);
+      case "volcengine":
+        return this.generateWithVolcEngine(ai, prompt);
+      default:
+        throw new Error(`Unsupported AI provider: ${ai.provider}`);
+    }
+  }
   findAiCompletionPlan(deck, sections) {
     var _a, _b, _c, _d, _e;
     if (!deck.config.ai) {
@@ -1074,7 +1128,7 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
     const prompt = buildPromptFromSource(plan.sourceContent, plan.instruction);
     new import_obsidian.Notice(`AI completing ${plan.targetSection} from ${plan.sourceSection}...`);
     try {
-      const output = await this.generateWithOllama(plan.aI, prompt);
+      const output = await this.generateAiOutput(plan.aI, prompt);
       const updated = replaceTopLevelSectionContent(raw, plan.targetSection, output);
       if (!updated.updated) {
         new import_obsidian.Notice(`Could not locate section ${plan.targetSection} in the current note.`);
