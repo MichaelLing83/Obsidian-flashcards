@@ -9,6 +9,7 @@ An Obsidian plugin for spaced repetition (SM-2) with deck schemas driven by per-
 - Multiple study modes from one card schema (for example `A -> B`, `B -> C`).
 - Separate memory history per mode, even for the same note.
 - Deck picker and mode picker before each review session.
+- Navigator context menu action `New Flashcard` for deck folders.
 - Nested deck protection (parent/child deck directories are rejected).
 - Daily limits for new cards and review cards.
 
@@ -79,6 +80,11 @@ Deck directories cannot be nested. If `parent/parent.flashcards` exists, then `p
 4. Choose a deck directory.
 5. Choose one configured deck mode.
 6. Review cards with Again/Hard/Good/Easy.
+
+Quick note creation:
+
+- In navigator, right-click a deck folder (one that has `<deck_dir>.flashcards`) and choose `New Flashcard`.
+- The plugin creates a new note template with all required sections as empty H1 blocks.
 
 ## Development
 

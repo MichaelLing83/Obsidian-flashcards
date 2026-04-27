@@ -560,6 +560,16 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
       name: "Open Flashcard Deck",
       callback: () => void this.openStudyView()
     });
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu, file) => {
+        if (!(file instanceof import_obsidian.TFolder)) return;
+        const configFile = this.getDeckConfigFileForFolder(file);
+        if (!configFile) return;
+        menu.addItem(
+          (item) => item.setTitle("New Flashcard").setIcon("plus-circle").onClick(() => void this.createFlashcardFromDeckFolder(file))
+        );
+      })
+    );
     this.addSettingTab(new FlashcardsSettingTab(this.app, this));
   }
   onunload() {
@@ -602,6 +612,70 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
     if (!file.parent) return false;
     if (file.extension !== "flashcards") return false;
     return file.basename === file.parent.name;
+  }
+  getDeckConfigFileForFolder(folder) {
+    const cfgPath = `${folder.path}/${folder.name}.flashcards`;
+    const cfg = this.app.vault.getAbstractFileByPath(cfgPath);
+    return cfg instanceof import_obsidian.TFile ? cfg : null;
+  }
+  async getDeckDefinitionForFolder(folder) {
+    const configFile = this.getDeckConfigFileForFolder(folder);
+    if (!configFile) {
+      return {
+        deck: null,
+        error: `Missing config file ${folder.name}.flashcards in ${folder.path}`
+      };
+    }
+    const raw = await this.app.vault.read(configFile);
+    const parsed = parseDeckConfig(raw);
+    if (!parsed.config) {
+      return {
+        deck: null,
+        error: `Config error in ${configFile.path}: ${parsed.error}`
+      };
+    }
+    return {
+      deck: {
+        folder,
+        configFile,
+        config: parsed.config
+      },
+      error: ""
+    };
+  }
+  createFlashcardTemplate(requiredSections) {
+    return requiredSections.map((section) => `# ${section}
+`).join("\n");
+  }
+  getUniqueNewFlashcardPath(folder) {
+    const base = `${folder.path}/New Flashcard`;
+    let candidate = `${base}.md`;
+    let n = 2;
+    while (this.app.vault.getAbstractFileByPath(candidate)) {
+      candidate = `${base} ${n}.md`;
+      n++;
+    }
+    return candidate;
+  }
+  async createFlashcardFromDeckFolder(folder) {
+    const deckResult = await this.getDeckDefinitionForFolder(folder);
+    if (!deckResult.deck) {
+      new import_obsidian.Notice(deckResult.error);
+      return;
+    }
+    const notePath = this.getUniqueNewFlashcardPath(folder);
+    const content = this.createFlashcardTemplate(
+      deckResult.deck.config.requiredSections
+    );
+    try {
+      const created = await this.app.vault.create(notePath, content);
+      const leaf = this.app.workspace.getLeaf("tab");
+      await leaf.openFile(created);
+      new import_obsidian.Notice(`Created flashcard: ${created.path}`);
+    } catch (error) {
+      console.error("Flashcards: failed to create note", error);
+      new import_obsidian.Notice("Failed to create flashcard note.");
+    }
   }
   async discoverDeckDefinitions() {
     const configFiles = this.app.vault.getFiles().filter((f) => this.isDeckConfigFile(f));

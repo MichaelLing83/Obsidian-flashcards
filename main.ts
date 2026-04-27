@@ -2,6 +2,7 @@ import {
 	App,
 	ItemView,
 	MarkdownRenderer,
+	Notice,
 	Plugin,
 	PluginSettingTab,
 	Setting,
@@ -809,6 +810,22 @@ export default class FlashcardsPlugin extends Plugin {
 			callback: () => void this.openStudyView(),
 		});
 
+		// Right-click deck folder -> New Flashcard
+		this.registerEvent(
+			this.app.workspace.on("file-menu", (menu, file) => {
+				if (!(file instanceof TFolder)) return;
+				const configFile = this.getDeckConfigFileForFolder(file);
+				if (!configFile) return;
+
+				menu.addItem((item) =>
+					item
+						.setTitle("New Flashcard")
+						.setIcon("plus-circle")
+						.onClick(() => void this.createFlashcardFromDeckFolder(file)),
+				);
+			}),
+		);
+
 		// Settings tab
 		this.addSettingTab(new FlashcardsSettingTab(this.app, this));
 	}
@@ -860,6 +877,82 @@ export default class FlashcardsPlugin extends Plugin {
 		if (!file.parent) return false;
 		if (file.extension !== "flashcards") return false;
 		return file.basename === file.parent.name;
+	}
+
+	private getDeckConfigFileForFolder(folder: TFolder): TFile | null {
+		const cfgPath = `${folder.path}/${folder.name}.flashcards`;
+		const cfg = this.app.vault.getAbstractFileByPath(cfgPath);
+		return cfg instanceof TFile ? cfg : null;
+	}
+
+	private async getDeckDefinitionForFolder(
+		folder: TFolder,
+	): Promise<{ deck: DeckDefinition | null; error: string }> {
+		const configFile = this.getDeckConfigFileForFolder(folder);
+		if (!configFile) {
+			return {
+				deck: null,
+				error: `Missing config file ${folder.name}.flashcards in ${folder.path}`,
+			};
+		}
+
+		const raw = await this.app.vault.read(configFile);
+		const parsed = parseDeckConfig(raw);
+		if (!parsed.config) {
+			return {
+				deck: null,
+				error: `Config error in ${configFile.path}: ${parsed.error}`,
+			};
+		}
+
+		return {
+			deck: {
+				folder,
+				configFile,
+				config: parsed.config,
+			},
+			error: "",
+		};
+	}
+
+	private createFlashcardTemplate(requiredSections: string[]): string {
+		return requiredSections.map((section) => `# ${section}\n`).join("\n");
+	}
+
+	private getUniqueNewFlashcardPath(folder: TFolder): string {
+		const base = `${folder.path}/New Flashcard`;
+		let candidate = `${base}.md`;
+		let n = 2;
+
+		while (this.app.vault.getAbstractFileByPath(candidate)) {
+			candidate = `${base} ${n}.md`;
+			n++;
+		}
+
+		return candidate;
+	}
+
+	private async createFlashcardFromDeckFolder(folder: TFolder): Promise<void> {
+		const deckResult = await this.getDeckDefinitionForFolder(folder);
+		if (!deckResult.deck) {
+			new Notice(deckResult.error);
+			return;
+		}
+
+		const notePath = this.getUniqueNewFlashcardPath(folder);
+		const content = this.createFlashcardTemplate(
+			deckResult.deck.config.requiredSections,
+		);
+
+		try {
+			const created = await this.app.vault.create(notePath, content);
+			const leaf = this.app.workspace.getLeaf("tab");
+			await leaf.openFile(created);
+			new Notice(`Created flashcard: ${created.path}`);
+		} catch (error) {
+			console.error("Flashcards: failed to create note", error);
+			new Notice("Failed to create flashcard note.");
+		}
 	}
 
 	private async discoverDeckDefinitions(): Promise<{
