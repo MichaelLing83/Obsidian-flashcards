@@ -10,6 +10,7 @@ An Obsidian plugin for spaced repetition (SM-2) with deck schemas driven by per-
 - Separate memory history per mode, even for the same note.
 - Deck picker and mode picker before each review session.
 - Navigator context menu action `New Flashcard` for deck folders.
+- AI completion button for card editing using local Ollama.
 - Nested deck protection (parent/child deck directories are rejected).
 - Daily limits for new cards and review cards.
 
@@ -27,7 +28,19 @@ Config format is JSON:
   "instances": [
     ["A", "B"],
     { "name": "B-to-C", "promptSection": "B", "answerSection": "C" }
-  ]
+  ],
+  "ai": {
+    "provider": "ollama",
+    "model": "qwen2.5:latest",
+    "prompts": {
+      "A": {
+        "B": "Generate section B from the content above. Output only the final section content."
+      },
+      "B": {
+        "C": "Generate section C from the content above. Output only the final section content."
+      }
+    }
+  }
 }
 ```
 
@@ -38,6 +51,10 @@ Rules:
 - `instances` must be a non-empty array.
 - Each instance can be either `["PromptSection", "AnswerSection"]` or an object with `promptSection` and `answerSection` (optional `name`).
 - `promptSection` and `answerSection` must exist in `requiredSections`.
+- `ai` is optional.
+- `ai.provider` currently supports only `ollama`.
+- `ai.model` is the local Ollama model name.
+- `ai.prompts[source][target]` defines the prompt suffix used to generate one target section from one source section.
 
 ## Card Notes
 
@@ -87,6 +104,14 @@ Quick note creation:
 
 - In navigator, right-click a deck folder (one that has `<deck_dir>.flashcards`) and choose `New Flashcard`.
 - The plugin creates a new note template with all required sections as empty H1 blocks.
+
+AI completion while editing:
+
+- Open a flashcard note inside a configured deck.
+- Use the status bar button `AI Complete`.
+- The plugin finds the first required section that already has content and uses that as the source prompt.
+- It then looks for the first empty required section that has an `ai.prompts[source][target]` mapping.
+- The note content plus that configured prompt suffix is sent to local Ollama, and the returned text is written into the target section.
 
 ## Development
 

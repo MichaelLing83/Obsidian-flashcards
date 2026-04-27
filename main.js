@@ -42,6 +42,7 @@ var MS_PER_DAY = 864e5;
 var DEBUG_PREFIX = "[Flashcards]";
 var MIN_CARD_FONT_SIZE_PX = 14;
 var MAX_CARD_FONT_SIZE_PX = 48;
+var DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 var VIEW_TYPE_FLASHCARD = "flashcard-study-view";
 var QUALITY = [1, 3, 4, 5];
 function nextInterval(rating, rec) {
@@ -179,12 +180,122 @@ function parseDeckConfig(raw) {
       answerSection
     });
   }
+  let ai;
+  if (typeof obj.ai !== "undefined") {
+    if (!obj.ai || typeof obj.ai !== "object") {
+      return {
+        config: null,
+        error: "ai must be an object when provided."
+      };
+    }
+    const aiObj = obj.ai;
+    if (aiObj.provider !== "ollama") {
+      return {
+        config: null,
+        error: 'ai.provider must be "ollama".'
+      };
+    }
+    const model = normalizeSectionName(aiObj.model);
+    if (!model) {
+      return {
+        config: null,
+        error: "ai.model must be a non-empty string."
+      };
+    }
+    const baseUrl = normalizeSectionName(aiObj.baseUrl) || DEFAULT_OLLAMA_BASE_URL;
+    if (!aiObj.prompts || typeof aiObj.prompts !== "object" || Array.isArray(aiObj.prompts)) {
+      return {
+        config: null,
+        error: "ai.prompts must be an object keyed by source section and target section."
+      };
+    }
+    const prompts = {};
+    for (const [sourceRaw, targetMapRaw] of Object.entries(aiObj.prompts)) {
+      const source = normalizeSectionName(sourceRaw);
+      if (!requiredSet.has(source)) {
+        return {
+          config: null,
+          error: `ai.prompts source section "${source}" must exist in requiredSections.`
+        };
+      }
+      if (!targetMapRaw || typeof targetMapRaw !== "object" || Array.isArray(targetMapRaw)) {
+        return {
+          config: null,
+          error: `ai.prompts.${source} must be an object keyed by target section.`
+        };
+      }
+      const targetMap = {};
+      for (const [targetRaw, promptRaw] of Object.entries(targetMapRaw)) {
+        const target = normalizeSectionName(targetRaw);
+        const prompt = normalizeSectionName(promptRaw);
+        if (!requiredSet.has(target)) {
+          return {
+            config: null,
+            error: `ai.prompts target section "${target}" must exist in requiredSections.`
+          };
+        }
+        if (!prompt) {
+          return {
+            config: null,
+            error: `ai.prompts.${source}.${target} must be a non-empty string.`
+          };
+        }
+        targetMap[target] = prompt;
+      }
+      prompts[source] = targetMap;
+    }
+    ai = {
+      provider: "ollama",
+      model,
+      baseUrl,
+      prompts
+    };
+  }
   return {
     config: {
       requiredSections,
-      instances
+      instances,
+      ai
     },
     error: ""
+  };
+}
+function buildPromptFromSource(sourceContent, instruction) {
+  return `${sourceContent.trim()}
+
+${instruction.trim()}`;
+}
+function replaceTopLevelSectionContent(markdown, sectionName, newContent) {
+  const lines = markdown.split("\n");
+  const headingPattern = /^#\s+(.+)$/;
+  let start = -1;
+  let end = lines.length;
+  for (let index = 0; index < lines.length; index++) {
+    const match = lines[index].match(headingPattern);
+    if (!match) continue;
+    const title = match[1].trim();
+    if (start === -1 && title === sectionName) {
+      start = index + 1;
+      continue;
+    }
+    if (start !== -1) {
+      end = index;
+      break;
+    }
+  }
+  if (start === -1) {
+    return { updatedMarkdown: markdown, updated: false };
+  }
+  const body = newContent.trim();
+  const replacement = body ? ["", ...body.split("\n"), ""] : [""];
+  const updatedLines = [
+    ...lines.slice(0, start),
+    ...replacement,
+    ...lines.slice(end)
+  ];
+  return {
+    updatedMarkdown: updatedLines.join("\n").replace(/\n{3,}/g, "\n\n"),
+    updated: true
   };
 }
 var SelectionModal = class extends import_obsidian.SuggestModal {
@@ -620,6 +731,7 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
     this.settings = { ...DEFAULT_SETTINGS };
     /** In-memory card records, kept in sync with data.json. */
     this.cardData = {};
+    this.aiStatusBarEl = null;
   }
   logDebug(message, meta) {
     if (typeof meta === "undefined") {
@@ -653,6 +765,37 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
         this.tryAddNewFlashcardMenuItem(menu, cast, "files-menu");
       })
     );
+  }
+  registerAiCompletionUi() {
+    this.aiStatusBarEl = this.addStatusBarItem();
+    this.aiStatusBarEl.addClass("mod-clickable");
+    this.aiStatusBarEl.setText("AI Complete");
+    this.aiStatusBarEl.addEventListener("click", () => void this.completeCurrentFlashcardWithAi());
+    this.addCommand({
+      id: "ai-complete-current-flashcard",
+      name: "AI Complete Current Flashcard",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        const canRun = file instanceof import_obsidian.TFile && file.extension === "md" && !this.isDeckConfigFile(file);
+        if (!checking && canRun) {
+          void this.completeCurrentFlashcardWithAi();
+        }
+        return canRun;
+      }
+    });
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", () => this.updateAiStatusBarVisibility())
+    );
+    this.registerEvent(
+      this.app.workspace.on("file-open", () => this.updateAiStatusBarVisibility())
+    );
+    this.updateAiStatusBarVisibility();
+  }
+  updateAiStatusBarVisibility() {
+    if (!this.aiStatusBarEl) return;
+    const activeFile = this.app.workspace.getActiveFile();
+    const visible = activeFile instanceof import_obsidian.TFile && activeFile.extension === "md" && !this.isDeckConfigFile(activeFile);
+    this.aiStatusBarEl.style.display = visible ? "" : "none";
   }
   tryAddNewFlashcardMenuItem(menu, file, sourceEvent) {
     var _a;
@@ -711,6 +854,7 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
     });
     this.logDebug("plugin loaded", { version: this.manifest.version });
     this.registerDeckFolderMenuHook();
+    this.registerAiCompletionUi();
     this.applyCardFontSizeToOpenViews();
     this.addSettingTab(new FlashcardsSettingTab(this.app, this));
   }
@@ -744,6 +888,124 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
       if (view instanceof FlashcardView) {
         view.refreshFontSizeVariable();
       }
+    }
+  }
+  async getDeckDefinitionForNote(file) {
+    if (this.isDeckConfigFile(file)) {
+      return {
+        deck: null,
+        error: "Deck config files cannot be AI-completed as flashcard notes."
+      };
+    }
+    const discovered = await this.discoverDeckDefinitions();
+    if (discovered.error) {
+      return { deck: null, error: discovered.error };
+    }
+    const deck = discovered.decks.filter((candidate) => file.path.startsWith(`${candidate.folder.path}/`)).sort((a, b) => b.folder.path.length - a.folder.path.length)[0];
+    if (!deck) {
+      return {
+        deck: null,
+        error: `The active note is not inside a configured flashcards deck: ${file.path}`
+      };
+    }
+    return { deck, error: "" };
+  }
+  async generateWithOllama(ai, prompt) {
+    const baseUrl = (ai.baseUrl || DEFAULT_OLLAMA_BASE_URL).replace(/\/$/, "");
+    const response = await fetch(`${baseUrl}/api/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: ai.model,
+        prompt,
+        stream: false
+      })
+    });
+    if (!response.ok) {
+      throw new Error(`Ollama request failed with status ${response.status}`);
+    }
+    const payload = await response.json();
+    const output = typeof payload.response === "string" ? payload.response.trim() : "";
+    if (!output) {
+      throw new Error("Ollama returned empty content.");
+    }
+    return output;
+  }
+  findAiCompletionPlan(deck, sections) {
+    var _a, _b, _c, _d, _e;
+    if (!deck.config.ai) {
+      return { error: `Deck ${deck.folder.path} has no ai configuration.` };
+    }
+    let sourceSection = "";
+    let sourceContent = "";
+    for (const section of deck.config.requiredSections) {
+      const content = (_b = (_a = sections.get(section)) == null ? void 0 : _a.trim()) != null ? _b : "";
+      if (content) {
+        sourceSection = section;
+        sourceContent = content;
+        break;
+      }
+    }
+    if (!sourceSection) {
+      return { error: "No source section has content yet. Fill the first source section before using AI Complete." };
+    }
+    const targetPrompts = deck.config.ai.prompts[sourceSection];
+    if (!targetPrompts) {
+      return {
+        error: `No AI prompt mapping is configured from section "${sourceSection}".`
+      };
+    }
+    for (const targetSection of deck.config.requiredSections) {
+      if (targetSection === sourceSection) continue;
+      const targetContent = (_d = (_c = sections.get(targetSection)) == null ? void 0 : _c.trim()) != null ? _d : "";
+      if (targetContent) continue;
+      const instruction = (_e = targetPrompts[targetSection]) == null ? void 0 : _e.trim();
+      if (instruction) {
+        return {
+          sourceSection,
+          sourceContent,
+          targetSection,
+          instruction,
+          aI: deck.config.ai
+        };
+      }
+    }
+    return {
+      error: `No AI prompt mapping found from section "${sourceSection}" to an empty target section.`
+    };
+  }
+  async completeCurrentFlashcardWithAi() {
+    const file = this.app.workspace.getActiveFile();
+    if (!(file instanceof import_obsidian.TFile) || file.extension !== "md") {
+      new import_obsidian.Notice("Open a markdown flashcard note before using AI Complete.");
+      return;
+    }
+    const deckResult = await this.getDeckDefinitionForNote(file);
+    if (!deckResult.deck) {
+      new import_obsidian.Notice(deckResult.error);
+      return;
+    }
+    const raw = await this.app.vault.read(file);
+    const sections = parseTopLevelSections(raw);
+    const plan = this.findAiCompletionPlan(deckResult.deck, sections);
+    if ("error" in plan) {
+      new import_obsidian.Notice(plan.error);
+      return;
+    }
+    const prompt = buildPromptFromSource(plan.sourceContent, plan.instruction);
+    new import_obsidian.Notice(`AI completing ${plan.targetSection} from ${plan.sourceSection}...`);
+    try {
+      const output = await this.generateWithOllama(plan.aI, prompt);
+      const updated = replaceTopLevelSectionContent(raw, plan.targetSection, output);
+      if (!updated.updated) {
+        new import_obsidian.Notice(`Could not locate section ${plan.targetSection} in the current note.`);
+        return;
+      }
+      await this.app.vault.modify(file, updated.updatedMarkdown);
+      new import_obsidian.Notice(`Filled section ${plan.targetSection} with AI output.`);
+    } catch (error) {
+      console.error(`${DEBUG_PREFIX} AI completion failed`, error);
+      new import_obsidian.Notice(`AI completion failed: ${error instanceof Error ? error.message : "Unknown error"}`);
     }
   }
   getDeckFontSizePx(deckPath) {

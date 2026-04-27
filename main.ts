@@ -1,6 +1,7 @@
 import {
 	App,
 	ItemView,
+	MarkdownView,
 	MarkdownRenderer,
 	Notice,
 	Plugin,
@@ -55,6 +56,14 @@ interface DeckInstanceConfig {
 interface DeckConfig {
 	requiredSections: string[];
 	instances: DeckInstanceConfig[];
+	ai?: DeckAiConfig;
+}
+
+interface DeckAiConfig {
+	provider: "ollama";
+	model: string;
+	baseUrl?: string;
+	prompts: Record<string, Record<string, string>>;
 }
 
 interface DeckDefinition {
@@ -94,6 +103,7 @@ const MS_PER_DAY = 86_400_000;
 const DEBUG_PREFIX = "[Flashcards]";
 const MIN_CARD_FONT_SIZE_PX = 14;
 const MAX_CARD_FONT_SIZE_PX = 48;
+const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 
 /** View type identifier. */
 const VIEW_TYPE_FLASHCARD = "flashcard-study-view";
@@ -221,6 +231,7 @@ function parseDeckConfig(raw: string): { config: DeckConfig | null; error: strin
 	const obj = parsed as {
 		requiredSections?: unknown;
 		instances?: unknown;
+		ai?: unknown;
 	};
 
 	if (!Array.isArray(obj.requiredSections) || obj.requiredSections.length === 0) {
@@ -293,12 +304,150 @@ function parseDeckConfig(raw: string): { config: DeckConfig | null; error: strin
 		});
 	}
 
+	let ai: DeckAiConfig | undefined;
+	if (typeof obj.ai !== "undefined") {
+		if (!obj.ai || typeof obj.ai !== "object") {
+			return {
+				config: null,
+				error: "ai must be an object when provided.",
+			};
+		}
+
+		const aiObj = obj.ai as {
+			provider?: unknown;
+			model?: unknown;
+			baseUrl?: unknown;
+			prompts?: unknown;
+		};
+
+		if (aiObj.provider !== "ollama") {
+			return {
+				config: null,
+				error: "ai.provider must be \"ollama\".",
+			};
+		}
+
+		const model = normalizeSectionName(aiObj.model);
+		if (!model) {
+			return {
+				config: null,
+				error: "ai.model must be a non-empty string.",
+			};
+		}
+
+		const baseUrl = normalizeSectionName(aiObj.baseUrl) || DEFAULT_OLLAMA_BASE_URL;
+		if (!aiObj.prompts || typeof aiObj.prompts !== "object" || Array.isArray(aiObj.prompts)) {
+			return {
+				config: null,
+				error: "ai.prompts must be an object keyed by source section and target section.",
+			};
+		}
+
+		const prompts: Record<string, Record<string, string>> = {};
+		for (const [sourceRaw, targetMapRaw] of Object.entries(aiObj.prompts as Record<string, unknown>)) {
+			const source = normalizeSectionName(sourceRaw);
+			if (!requiredSet.has(source)) {
+				return {
+					config: null,
+					error: `ai.prompts source section \"${source}\" must exist in requiredSections.`,
+				};
+			}
+
+			if (!targetMapRaw || typeof targetMapRaw !== "object" || Array.isArray(targetMapRaw)) {
+				return {
+					config: null,
+					error: `ai.prompts.${source} must be an object keyed by target section.`,
+				};
+			}
+
+			const targetMap: Record<string, string> = {};
+			for (const [targetRaw, promptRaw] of Object.entries(targetMapRaw as Record<string, unknown>)) {
+				const target = normalizeSectionName(targetRaw);
+				const prompt = normalizeSectionName(promptRaw);
+
+				if (!requiredSet.has(target)) {
+					return {
+						config: null,
+						error: `ai.prompts target section \"${target}\" must exist in requiredSections.`,
+					};
+				}
+
+				if (!prompt) {
+					return {
+						config: null,
+						error: `ai.prompts.${source}.${target} must be a non-empty string.`,
+					};
+				}
+
+				targetMap[target] = prompt;
+			}
+
+			prompts[source] = targetMap;
+		}
+
+		ai = {
+			provider: "ollama",
+			model,
+			baseUrl,
+			prompts,
+		};
+	}
+
 	return {
 		config: {
 			requiredSections,
 			instances,
+			ai,
 		},
 		error: "",
+	};
+}
+
+function buildPromptFromSource(sourceContent: string, instruction: string): string {
+	return `${sourceContent.trim()}\n\n${instruction.trim()}`;
+}
+
+function replaceTopLevelSectionContent(
+	markdown: string,
+	sectionName: string,
+	newContent: string,
+): { updatedMarkdown: string; updated: boolean } {
+	const lines = markdown.split("\n");
+	const headingPattern = /^#\s+(.+)$/;
+	let start = -1;
+	let end = lines.length;
+
+	for (let index = 0; index < lines.length; index++) {
+		const match = lines[index].match(headingPattern);
+		if (!match) continue;
+
+		const title = match[1].trim();
+		if (start === -1 && title === sectionName) {
+			start = index + 1;
+			continue;
+		}
+
+		if (start !== -1) {
+			end = index;
+			break;
+		}
+	}
+
+	if (start === -1) {
+		return { updatedMarkdown: markdown, updated: false };
+	}
+
+	const body = newContent.trim();
+	const replacement = body ? ["", ...body.split("\n"), ""] : [""];
+	const updatedLines = [
+		...lines.slice(0, start),
+		...replacement,
+		...lines.slice(end),
+	];
+
+	return {
+		updatedMarkdown: updatedLines.join("\n").replace(/\n{3,}/g, "\n\n"),
+		updated: true,
 	};
 }
 
@@ -894,6 +1043,7 @@ export default class FlashcardsPlugin extends Plugin {
 	settings: FlashcardsSettings = { ...DEFAULT_SETTINGS };
 	/** In-memory card records, kept in sync with data.json. */
 	cardData: Record<string, CardRecord> = {};
+	private aiStatusBarEl: HTMLElement | null = null;
 
 	private logDebug(message: string, meta?: unknown): void {
 		if (typeof meta === "undefined") {
@@ -932,6 +1082,42 @@ export default class FlashcardsPlugin extends Plugin {
 				this.tryAddNewFlashcardMenuItem(menu, cast, "files-menu");
 			}) as any,
 		);
+	}
+
+	private registerAiCompletionUi(): void {
+		this.aiStatusBarEl = this.addStatusBarItem();
+		this.aiStatusBarEl.addClass("mod-clickable");
+		this.aiStatusBarEl.setText("AI Complete");
+		this.aiStatusBarEl.addEventListener("click", () => void this.completeCurrentFlashcardWithAi());
+
+		this.addCommand({
+			id: "ai-complete-current-flashcard",
+			name: "AI Complete Current Flashcard",
+			checkCallback: (checking) => {
+				const file = this.app.workspace.getActiveFile();
+				const canRun = file instanceof TFile && file.extension === "md" && !this.isDeckConfigFile(file);
+				if (!checking && canRun) {
+					void this.completeCurrentFlashcardWithAi();
+				}
+				return canRun;
+			},
+		});
+
+		this.registerEvent(
+			this.app.workspace.on("active-leaf-change", () => this.updateAiStatusBarVisibility()),
+		);
+		this.registerEvent(
+			this.app.workspace.on("file-open", () => this.updateAiStatusBarVisibility()),
+		);
+
+		this.updateAiStatusBarVisibility();
+	}
+
+	private updateAiStatusBarVisibility(): void {
+		if (!this.aiStatusBarEl) return;
+		const activeFile = this.app.workspace.getActiveFile();
+		const visible = activeFile instanceof TFile && activeFile.extension === "md" && !this.isDeckConfigFile(activeFile);
+		this.aiStatusBarEl.style.display = visible ? "" : "none";
 	}
 
 	private tryAddNewFlashcardMenuItem(
@@ -1015,6 +1201,7 @@ export default class FlashcardsPlugin extends Plugin {
 
 		this.logDebug("plugin loaded", { version: this.manifest.version });
 		this.registerDeckFolderMenuHook();
+		this.registerAiCompletionUi();
 		this.applyCardFontSizeToOpenViews();
 
 		// Settings tab
@@ -1054,6 +1241,160 @@ export default class FlashcardsPlugin extends Plugin {
 			if (view instanceof FlashcardView) {
 				view.refreshFontSizeVariable();
 			}
+		}
+	}
+
+	private async getDeckDefinitionForNote(
+		file: TFile,
+	): Promise<{ deck: DeckDefinition | null; error: string }> {
+		if (this.isDeckConfigFile(file)) {
+			return {
+				deck: null,
+				error: "Deck config files cannot be AI-completed as flashcard notes.",
+			};
+		}
+
+		const discovered = await this.discoverDeckDefinitions();
+		if (discovered.error) {
+			return { deck: null, error: discovered.error };
+		}
+
+		const deck = discovered.decks
+			.filter((candidate) => file.path.startsWith(`${candidate.folder.path}/`))
+			.sort((a, b) => b.folder.path.length - a.folder.path.length)[0];
+
+		if (!deck) {
+			return {
+				deck: null,
+				error: `The active note is not inside a configured flashcards deck: ${file.path}`,
+			};
+		}
+
+		return { deck, error: "" };
+	}
+
+	private async generateWithOllama(ai: DeckAiConfig, prompt: string): Promise<string> {
+		const baseUrl = (ai.baseUrl || DEFAULT_OLLAMA_BASE_URL).replace(/\/$/, "");
+		const response = await fetch(`${baseUrl}/api/generate`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				model: ai.model,
+				prompt,
+				stream: false,
+			}),
+		});
+
+		if (!response.ok) {
+			throw new Error(`Ollama request failed with status ${response.status}`);
+		}
+
+		const payload = (await response.json()) as { response?: unknown };
+		const output = typeof payload.response === "string" ? payload.response.trim() : "";
+		if (!output) {
+			throw new Error("Ollama returned empty content.");
+		}
+
+		return output;
+	}
+
+	private findAiCompletionPlan(
+		deck: DeckDefinition,
+		sections: Map<string, string>,
+	):
+		| {
+				sourceSection: string;
+				sourceContent: string;
+				targetSection: string;
+				instruction: string;
+				aI: DeckAiConfig;
+			}
+		| { error: string } {
+		if (!deck.config.ai) {
+			return { error: `Deck ${deck.folder.path} has no ai configuration.` };
+		}
+
+		let sourceSection = "";
+		let sourceContent = "";
+		for (const section of deck.config.requiredSections) {
+			const content = sections.get(section)?.trim() ?? "";
+			if (content) {
+				sourceSection = section;
+				sourceContent = content;
+				break;
+			}
+		}
+
+		if (!sourceSection) {
+			return { error: "No source section has content yet. Fill the first source section before using AI Complete." };
+		}
+
+		const targetPrompts = deck.config.ai.prompts[sourceSection];
+		if (!targetPrompts) {
+			return {
+				error: `No AI prompt mapping is configured from section \"${sourceSection}\".`,
+			};
+		}
+
+		for (const targetSection of deck.config.requiredSections) {
+			if (targetSection === sourceSection) continue;
+			const targetContent = sections.get(targetSection)?.trim() ?? "";
+			if (targetContent) continue;
+			const instruction = targetPrompts[targetSection]?.trim();
+			if (instruction) {
+				return {
+					sourceSection,
+					sourceContent,
+					targetSection,
+					instruction,
+					aI: deck.config.ai,
+				};
+			}
+		}
+
+		return {
+			error:
+				`No AI prompt mapping found from section \"${sourceSection}\" to an empty target section.`,
+		};
+	}
+
+	async completeCurrentFlashcardWithAi(): Promise<void> {
+		const file = this.app.workspace.getActiveFile();
+		if (!(file instanceof TFile) || file.extension !== "md") {
+			new Notice("Open a markdown flashcard note before using AI Complete.");
+			return;
+		}
+
+		const deckResult = await this.getDeckDefinitionForNote(file);
+		if (!deckResult.deck) {
+			new Notice(deckResult.error);
+			return;
+		}
+
+		const raw = await this.app.vault.read(file);
+		const sections = parseTopLevelSections(raw);
+		const plan = this.findAiCompletionPlan(deckResult.deck, sections);
+		if ("error" in plan) {
+			new Notice(plan.error);
+			return;
+		}
+
+		const prompt = buildPromptFromSource(plan.sourceContent, plan.instruction);
+		new Notice(`AI completing ${plan.targetSection} from ${plan.sourceSection}...`);
+
+		try {
+			const output = await this.generateWithOllama(plan.aI, prompt);
+			const updated = replaceTopLevelSectionContent(raw, plan.targetSection, output);
+			if (!updated.updated) {
+				new Notice(`Could not locate section ${plan.targetSection} in the current note.`);
+				return;
+			}
+
+			await this.app.vault.modify(file, updated.updatedMarkdown);
+			new Notice(`Filled section ${plan.targetSection} with AI output.`);
+		} catch (error) {
+			console.error(`${DEBUG_PREFIX} AI completion failed`, error);
+			new Notice(`AI completion failed: ${error instanceof Error ? error.message : "Unknown error"}`);
 		}
 	}
 
