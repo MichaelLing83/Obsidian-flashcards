@@ -221,6 +221,10 @@
 	font-size: 1em;
 }
 
+.flashcard-btn-new-note {
+	padding: 8px 18px;
+}
+
 /* ── Rating bar ─────────────────────────────────────────────────────────── */
 
 .flashcard-rating-bar {

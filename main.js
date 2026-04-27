@@ -650,6 +650,16 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
       await this.renderMarkdown(back, backContent, card.file.path);
     }
     const footer = el.createDiv({ cls: "flashcard-footer" });
+    if (this.activeSelection) {
+      const newBtn = footer.createEl("button", {
+        cls: "flashcard-btn flashcard-btn-primary flashcard-btn-new-note",
+        text: "New Flashcard"
+      });
+      newBtn.addEventListener(
+        "click",
+        () => void this.createFlashcardInActiveDeck()
+      );
+    }
     if (!this.revealed) {
       const showBtn = footer.createEl("button", {
         cls: "flashcard-btn flashcard-btn-show",
@@ -871,6 +881,18 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
         return canRun;
       }
     });
+    this.addCommand({
+      id: "ai-complete-current-deck",
+      name: "AI Complete Current Deck",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        const canRun = file instanceof import_obsidian.TFile && file.extension === "md" && !this.isDeckConfigFile(file);
+        if (!checking && canRun) {
+          void this.completeCurrentDeckWithAi();
+        }
+        return canRun;
+      }
+    });
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => this.updateAiStatusBarVisibility())
     );
@@ -1025,7 +1047,8 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
     if (!ai.apiKey) {
       throw new Error("VolcEngine API key is missing.");
     }
-    const response = await fetch(`${baseUrl}/chat/completions`, {
+    const response = await (0, import_obsidian.requestUrl)({
+      url: `${baseUrl}/chat/completions`,
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -1041,13 +1064,13 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
         ]
       })
     });
-    if (!response.ok) {
-      const errorText = await response.text();
+    if (response.status < 200 || response.status >= 300) {
+      const errorText = typeof response.text === "string" ? response.text : "";
       throw new Error(
         `VolcEngine request failed with status ${response.status}${errorText ? `: ${errorText}` : ""}`
       );
     }
-    const payload = await response.json();
+    const payload = response.json;
     const output = typeof ((_c = (_b = (_a = payload.choices) == null ? void 0 : _a[0]) == null ? void 0 : _b.message) == null ? void 0 : _c.content) === "string" ? payload.choices[0].message.content.trim() : "";
     if (!output) {
       throw new Error("VolcEngine returned empty content.");
@@ -1055,6 +1078,12 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
     return output;
   }
   async generateAiOutput(ai, prompt) {
+    this.logDebug("AI request start", {
+      provider: ai.provider,
+      model: ai.model,
+      baseUrl: ai.baseUrl,
+      promptLength: prompt.length
+    });
     switch (ai.provider) {
       case "ollama":
         return this.generateWithOllama(ai, prompt);
@@ -1067,6 +1096,9 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
   findAiCompletionPlan(deck, sections) {
     var _a, _b, _c, _d, _e;
     if (!deck.config.ai) {
+      this.logDebug("AI completion skipped: deck has no ai config", {
+        deckPath: deck.folder.path
+      });
       return { error: `Deck ${deck.folder.path} has no ai configuration.` };
     }
     let sourceSection = "";
@@ -1080,10 +1112,17 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
       }
     }
     if (!sourceSection) {
+      this.logDebug("AI completion skipped: no source section content", {
+        deckPath: deck.folder.path
+      });
       return { error: "No source section has content yet. Fill the first source section before using AI Complete." };
     }
     const targetPrompts = deck.config.ai.prompts[sourceSection];
     if (!targetPrompts) {
+      this.logDebug("AI completion skipped: no source->target mapping", {
+        deckPath: deck.folder.path,
+        sourceSection
+      });
       return {
         error: `No AI prompt mapping is configured from section "${sourceSection}".`
       };
@@ -1107,6 +1146,52 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
       error: `No AI prompt mapping found from section "${sourceSection}" to an empty target section.`
     };
   }
+  logAiPlan(filePath, sourceSection, targetSection) {
+    this.logDebug("AI completion plan", {
+      filePath,
+      sourceSection,
+      targetSection
+    });
+  }
+  async completeSingleFlashcardWithAi(file, deck) {
+    this.logDebug("AI single start", {
+      filePath: file.path,
+      deckPath: deck.folder.path
+    });
+    const raw = await this.app.vault.read(file);
+    const sections = parseTopLevelSections(raw);
+    const plan = this.findAiCompletionPlan(deck, sections);
+    if ("error" in plan) {
+      this.logDebug("AI single skipped", {
+        filePath: file.path,
+        reason: plan.error
+      });
+      return "skipped";
+    }
+    this.logAiPlan(file.path, plan.sourceSection, plan.targetSection);
+    const prompt = buildPromptFromSource(plan.sourceContent, plan.instruction);
+    try {
+      const output = await this.generateAiOutput(plan.aI, prompt);
+      const updated = replaceTopLevelSectionContent(raw, plan.targetSection, output);
+      if (!updated.updated) {
+        this.logDebug("AI single failed: target section not found", {
+          filePath: file.path,
+          targetSection: plan.targetSection
+        });
+        return "failed";
+      }
+      await this.app.vault.modify(file, updated.updatedMarkdown);
+      this.logDebug("AI single filled", {
+        filePath: file.path,
+        targetSection: plan.targetSection,
+        outputLength: output.length
+      });
+      return "filled";
+    } catch (error) {
+      console.error(`${DEBUG_PREFIX} AI completion failed`, { file: file.path, error });
+      return "failed";
+    }
+  }
   async completeCurrentFlashcardWithAi() {
     const file = this.app.workspace.getActiveFile();
     if (!(file instanceof import_obsidian.TFile) || file.extension !== "md") {
@@ -1118,28 +1203,61 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
       new import_obsidian.Notice(deckResult.error);
       return;
     }
-    const raw = await this.app.vault.read(file);
-    const sections = parseTopLevelSections(raw);
-    const plan = this.findAiCompletionPlan(deckResult.deck, sections);
-    if ("error" in plan) {
-      new import_obsidian.Notice(plan.error);
+    this.logDebug("AI current note command", {
+      filePath: file.path,
+      deckPath: deckResult.deck.folder.path
+    });
+    new import_obsidian.Notice("AI completing current flashcard...");
+    const status = await this.completeSingleFlashcardWithAi(file, deckResult.deck);
+    if (status === "filled") {
+      new import_obsidian.Notice("Filled one section with AI output.");
+    } else if (status === "skipped") {
+      new import_obsidian.Notice("No eligible empty target section found for current flashcard.");
+    } else {
+      new import_obsidian.Notice("AI completion failed for current flashcard.");
+    }
+  }
+  async completeCurrentDeckWithAi() {
+    const active = this.app.workspace.getActiveFile();
+    if (!(active instanceof import_obsidian.TFile) || active.extension !== "md") {
+      new import_obsidian.Notice("Open a flashcard note inside the deck first.");
       return;
     }
-    const prompt = buildPromptFromSource(plan.sourceContent, plan.instruction);
-    new import_obsidian.Notice(`AI completing ${plan.targetSection} from ${plan.sourceSection}...`);
-    try {
-      const output = await this.generateAiOutput(plan.aI, prompt);
-      const updated = replaceTopLevelSectionContent(raw, plan.targetSection, output);
-      if (!updated.updated) {
-        new import_obsidian.Notice(`Could not locate section ${plan.targetSection} in the current note.`);
-        return;
-      }
-      await this.app.vault.modify(file, updated.updatedMarkdown);
-      new import_obsidian.Notice(`Filled section ${plan.targetSection} with AI output.`);
-    } catch (error) {
-      console.error(`${DEBUG_PREFIX} AI completion failed`, error);
-      new import_obsidian.Notice(`AI completion failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+    const deckResult = await this.getDeckDefinitionForNote(active);
+    if (!deckResult.deck) {
+      new import_obsidian.Notice(deckResult.error);
+      return;
     }
+    this.logDebug("AI deck command", {
+      activeFile: active.path,
+      deckPath: deckResult.deck.folder.path
+    });
+    const files = this.collectDeckMarkdownFiles(deckResult.deck.folder);
+    if (files.length === 0) {
+      new import_obsidian.Notice("No flashcard notes found in this deck.");
+      return;
+    }
+    new import_obsidian.Notice(`AI completing deck: ${deckResult.deck.folder.path} (${files.length} notes)...`);
+    let filled = 0;
+    let skipped = 0;
+    let failed = 0;
+    for (const file of files) {
+      const status = await this.completeSingleFlashcardWithAi(file, deckResult.deck);
+      if (status === "filled") filled++;
+      else if (status === "skipped") skipped++;
+      else failed++;
+    }
+    this.logDebug("AI deck command done", {
+      deckPath: deckResult.deck.folder.path,
+      total: files.length,
+      filled,
+      skipped,
+      failed
+    });
+    new import_obsidian.Notice(
+      `AI deck completion done: filled ${filled}, skipped ${skipped}, failed ${failed}.`,
+      8e3
+    );
   }
   getDeckFontSizePx(deckPath) {
     var _a;
@@ -1216,13 +1334,32 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
     return requiredSections.map((section) => `# ${section}
 `).join("\n");
   }
+  collectDeckMarkdownFiles(folder) {
+    const files = [];
+    for (const child of folder.children) {
+      if (child instanceof import_obsidian.TFile && child.extension === "md") {
+        if (!this.isDeckConfigFile(child)) {
+          files.push(child);
+        }
+      } else if (child instanceof import_obsidian.TFolder) {
+        files.push(...this.collectDeckMarkdownFiles(child));
+      }
+    }
+    return files;
+  }
+  buildDefaultFlashcardBaseName(folder) {
+    const existingCount = this.collectDeckMarkdownFiles(folder).length;
+    const nextIndex = existingCount + 1;
+    return `${folder.name}.${String(nextIndex).padStart(4, "0")}`;
+  }
   getUniqueNewFlashcardPath(folder) {
-    const base = `${folder.path}/New Flashcard`;
+    const baseName = this.buildDefaultFlashcardBaseName(folder);
+    const base = `${folder.path}/${baseName}`;
     let candidate = `${base}.md`;
-    let n = 2;
+    let n = Number(baseName.split(".").pop() || "1");
     while (this.app.vault.getAbstractFileByPath(candidate)) {
-      candidate = `${base} ${n}.md`;
       n++;
+      candidate = `${folder.path}/${folder.name}.${String(n).padStart(4, "0")}.md`;
     }
     return candidate;
   }

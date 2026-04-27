@@ -6,6 +6,7 @@ import {
 	Notice,
 	Plugin,
 	PluginSettingTab,
+	requestUrl,
 	Setting,
 	SuggestModal,
 	TAbstractFile,
@@ -923,6 +924,15 @@ export class FlashcardView extends ItemView {
 
 		// ── Footer ───────────────────────────────────────────────────────
 		const footer = el.createDiv({ cls: "flashcard-footer" });
+		if (this.activeSelection) {
+			const newBtn = footer.createEl("button", {
+				cls: "flashcard-btn flashcard-btn-primary flashcard-btn-new-note",
+				text: "New Flashcard",
+			});
+			newBtn.addEventListener("click", () =>
+				void this.createFlashcardInActiveDeck(),
+			);
+		}
 
 		if (!this.revealed) {
 			const showBtn = footer.createEl("button", {
@@ -1212,6 +1222,19 @@ export default class FlashcardsPlugin extends Plugin {
 			},
 		});
 
+		this.addCommand({
+			id: "ai-complete-current-deck",
+			name: "AI Complete Current Deck",
+			checkCallback: (checking) => {
+				const file = this.app.workspace.getActiveFile();
+				const canRun = file instanceof TFile && file.extension === "md" && !this.isDeckConfigFile(file);
+				if (!checking && canRun) {
+					void this.completeCurrentDeckWithAi();
+				}
+				return canRun;
+			},
+		});
+
 		this.registerEvent(
 			this.app.workspace.on("active-leaf-change", () => this.updateAiStatusBarVisibility()),
 		);
@@ -1413,7 +1436,8 @@ export default class FlashcardsPlugin extends Plugin {
 			throw new Error("VolcEngine API key is missing.");
 		}
 
-		const response = await fetch(`${baseUrl}/chat/completions`, {
+		const response = await requestUrl({
+			url: `${baseUrl}/chat/completions`,
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
@@ -1430,14 +1454,14 @@ export default class FlashcardsPlugin extends Plugin {
 			}),
 		});
 
-		if (!response.ok) {
-			const errorText = await response.text();
+		if (response.status < 200 || response.status >= 300) {
+			const errorText = typeof response.text === "string" ? response.text : "";
 			throw new Error(
 				`VolcEngine request failed with status ${response.status}${errorText ? `: ${errorText}` : ""}`,
 			);
 		}
 
-		const payload = (await response.json()) as {
+		const payload = response.json as {
 			choices?: Array<{
 				message?: {
 					content?: unknown;
@@ -1456,6 +1480,12 @@ export default class FlashcardsPlugin extends Plugin {
 	}
 
 	private async generateAiOutput(ai: DeckAiConfig, prompt: string): Promise<string> {
+		this.logDebug("AI request start", {
+			provider: ai.provider,
+			model: ai.model,
+			baseUrl: ai.baseUrl,
+			promptLength: prompt.length,
+		});
 		switch (ai.provider) {
 			case "ollama":
 				return this.generateWithOllama(ai, prompt);
@@ -1479,6 +1509,9 @@ export default class FlashcardsPlugin extends Plugin {
 			}
 		| { error: string } {
 		if (!deck.config.ai) {
+			this.logDebug("AI completion skipped: deck has no ai config", {
+				deckPath: deck.folder.path,
+			});
 			return { error: `Deck ${deck.folder.path} has no ai configuration.` };
 		}
 
@@ -1494,11 +1527,18 @@ export default class FlashcardsPlugin extends Plugin {
 		}
 
 		if (!sourceSection) {
+			this.logDebug("AI completion skipped: no source section content", {
+				deckPath: deck.folder.path,
+			});
 			return { error: "No source section has content yet. Fill the first source section before using AI Complete." };
 		}
 
 		const targetPrompts = deck.config.ai.prompts[sourceSection];
 		if (!targetPrompts) {
+			this.logDebug("AI completion skipped: no source->target mapping", {
+				deckPath: deck.folder.path,
+				sourceSection,
+			});
 			return {
 				error: `No AI prompt mapping is configured from section \"${sourceSection}\".`,
 			};
@@ -1518,12 +1558,69 @@ export default class FlashcardsPlugin extends Plugin {
 					aI: deck.config.ai,
 				};
 			}
-		}
+			}
 
 		return {
 			error:
 				`No AI prompt mapping found from section \"${sourceSection}\" to an empty target section.`,
 		};
+	}
+
+	private logAiPlan(filePath: string, sourceSection: string, targetSection: string): void {
+		this.logDebug("AI completion plan", {
+			filePath,
+			sourceSection,
+			targetSection,
+		});
+	}
+
+	private async completeSingleFlashcardWithAi(
+		file: TFile,
+		deck: DeckDefinition,
+	): Promise<"filled" | "skipped" | "failed"> {
+		this.logDebug("AI single start", {
+			filePath: file.path,
+			deckPath: deck.folder.path,
+		});
+
+		const raw = await this.app.vault.read(file);
+		const sections = parseTopLevelSections(raw);
+		const plan = this.findAiCompletionPlan(deck, sections);
+
+		if ("error" in plan) {
+			this.logDebug("AI single skipped", {
+				filePath: file.path,
+				reason: plan.error,
+			});
+			return "skipped";
+		}
+
+		this.logAiPlan(file.path, plan.sourceSection, plan.targetSection);
+
+		const prompt = buildPromptFromSource(plan.sourceContent, plan.instruction);
+
+		try {
+			const output = await this.generateAiOutput(plan.aI, prompt);
+			const updated = replaceTopLevelSectionContent(raw, plan.targetSection, output);
+			if (!updated.updated) {
+				this.logDebug("AI single failed: target section not found", {
+					filePath: file.path,
+					targetSection: plan.targetSection,
+				});
+				return "failed";
+			}
+
+			await this.app.vault.modify(file, updated.updatedMarkdown);
+			this.logDebug("AI single filled", {
+				filePath: file.path,
+				targetSection: plan.targetSection,
+				outputLength: output.length,
+			});
+			return "filled";
+		} catch (error) {
+			console.error(`${DEBUG_PREFIX} AI completion failed`, { file: file.path, error });
+			return "failed";
+		}
 	}
 
 	async completeCurrentFlashcardWithAi(): Promise<void> {
@@ -1539,31 +1636,71 @@ export default class FlashcardsPlugin extends Plugin {
 			return;
 		}
 
-		const raw = await this.app.vault.read(file);
-		const sections = parseTopLevelSections(raw);
-		const plan = this.findAiCompletionPlan(deckResult.deck, sections);
-		if ("error" in plan) {
-			new Notice(plan.error);
+		this.logDebug("AI current note command", {
+			filePath: file.path,
+			deckPath: deckResult.deck.folder.path,
+		});
+
+		new Notice("AI completing current flashcard...");
+		const status = await this.completeSingleFlashcardWithAi(file, deckResult.deck);
+		if (status === "filled") {
+			new Notice("Filled one section with AI output.");
+		} else if (status === "skipped") {
+			new Notice("No eligible empty target section found for current flashcard.");
+		} else {
+			new Notice("AI completion failed for current flashcard.");
+		}
+	}
+
+	async completeCurrentDeckWithAi(): Promise<void> {
+		const active = this.app.workspace.getActiveFile();
+		if (!(active instanceof TFile) || active.extension !== "md") {
+			new Notice("Open a flashcard note inside the deck first.");
 			return;
 		}
 
-		const prompt = buildPromptFromSource(plan.sourceContent, plan.instruction);
-		new Notice(`AI completing ${plan.targetSection} from ${plan.sourceSection}...`);
-
-		try {
-			const output = await this.generateAiOutput(plan.aI, prompt);
-			const updated = replaceTopLevelSectionContent(raw, plan.targetSection, output);
-			if (!updated.updated) {
-				new Notice(`Could not locate section ${plan.targetSection} in the current note.`);
-				return;
-			}
-
-			await this.app.vault.modify(file, updated.updatedMarkdown);
-			new Notice(`Filled section ${plan.targetSection} with AI output.`);
-		} catch (error) {
-			console.error(`${DEBUG_PREFIX} AI completion failed`, error);
-			new Notice(`AI completion failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+		const deckResult = await this.getDeckDefinitionForNote(active);
+		if (!deckResult.deck) {
+			new Notice(deckResult.error);
+			return;
 		}
+
+		this.logDebug("AI deck command", {
+			activeFile: active.path,
+			deckPath: deckResult.deck.folder.path,
+		});
+
+		const files = this.collectDeckMarkdownFiles(deckResult.deck.folder);
+		if (files.length === 0) {
+			new Notice("No flashcard notes found in this deck.");
+			return;
+		}
+
+		new Notice(`AI completing deck: ${deckResult.deck.folder.path} (${files.length} notes)...`);
+
+		let filled = 0;
+		let skipped = 0;
+		let failed = 0;
+
+		for (const file of files) {
+			const status = await this.completeSingleFlashcardWithAi(file, deckResult.deck);
+			if (status === "filled") filled++;
+			else if (status === "skipped") skipped++;
+			else failed++;
+		}
+
+		this.logDebug("AI deck command done", {
+			deckPath: deckResult.deck.folder.path,
+			total: files.length,
+			filled,
+			skipped,
+			failed,
+		});
+
+		new Notice(
+			`AI deck completion done: filled ${filled}, skipped ${skipped}, failed ${failed}.`,
+			8000,
+		);
 	}
 
 	getDeckFontSizePx(deckPath: string | null | undefined): number {
@@ -1657,14 +1794,35 @@ export default class FlashcardsPlugin extends Plugin {
 		return requiredSections.map((section) => `# ${section}\n`).join("\n");
 	}
 
+	private collectDeckMarkdownFiles(folder: TFolder): TFile[] {
+		const files: TFile[] = [];
+		for (const child of folder.children) {
+			if (child instanceof TFile && child.extension === "md") {
+				if (!this.isDeckConfigFile(child)) {
+					files.push(child);
+				}
+			} else if (child instanceof TFolder) {
+				files.push(...this.collectDeckMarkdownFiles(child));
+			}
+		}
+		return files;
+	}
+
+	private buildDefaultFlashcardBaseName(folder: TFolder): string {
+		const existingCount = this.collectDeckMarkdownFiles(folder).length;
+		const nextIndex = existingCount + 1;
+		return `${folder.name}.${String(nextIndex).padStart(4, "0")}`;
+	}
+
 	private getUniqueNewFlashcardPath(folder: TFolder): string {
-		const base = `${folder.path}/New Flashcard`;
+		const baseName = this.buildDefaultFlashcardBaseName(folder);
+		const base = `${folder.path}/${baseName}`;
 		let candidate = `${base}.md`;
-		let n = 2;
+		let n = Number(baseName.split(".").pop() || "1");
 
 		while (this.app.vault.getAbstractFileByPath(candidate)) {
-			candidate = `${base} ${n}.md`;
 			n++;
+			candidate = `${folder.path}/${folder.name}.${String(n).padStart(4, "0")}.md`;
 		}
 
 		return candidate;
