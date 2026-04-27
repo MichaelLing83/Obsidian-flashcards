@@ -608,15 +608,23 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
   getInstanceKey(deckPath, instance) {
     return `${deckPath}::${instance.promptSection}->${instance.answerSection}`;
   }
+  isDeckConfigFileName(fileName, folderName) {
+    return fileName === `${folderName}.flashcards` || fileName === `${folderName}.flashcards.md`;
+  }
   isDeckConfigFile(file) {
     if (!file.parent) return false;
-    if (file.extension !== "flashcards") return false;
-    return file.basename === file.parent.name;
+    return this.isDeckConfigFileName(file.name, file.parent.name);
   }
   getDeckConfigFileForFolder(folder) {
-    const cfgPath = `${folder.path}/${folder.name}.flashcards`;
-    const cfg = this.app.vault.getAbstractFileByPath(cfgPath);
-    return cfg instanceof import_obsidian.TFile ? cfg : null;
+    const candidates = [
+      `${folder.path}/${folder.name}.flashcards`,
+      `${folder.path}/${folder.name}.flashcards.md`
+    ];
+    for (const cfgPath of candidates) {
+      const cfg = this.app.vault.getAbstractFileByPath(cfgPath);
+      if (cfg instanceof import_obsidian.TFile) return cfg;
+    }
+    return null;
   }
   async getDeckDefinitionForFolder(folder) {
     const configFile = this.getDeckConfigFileForFolder(folder);

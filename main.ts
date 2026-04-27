@@ -873,16 +873,28 @@ export default class FlashcardsPlugin extends Plugin {
 		return `${deckPath}::${instance.promptSection}->${instance.answerSection}`;
 	}
 
+	private isDeckConfigFileName(fileName: string, folderName: string): boolean {
+		return (
+			fileName === `${folderName}.flashcards` ||
+			fileName === `${folderName}.flashcards.md`
+		);
+	}
+
 	private isDeckConfigFile(file: TFile): boolean {
 		if (!file.parent) return false;
-		if (file.extension !== "flashcards") return false;
-		return file.basename === file.parent.name;
+		return this.isDeckConfigFileName(file.name, file.parent.name);
 	}
 
 	private getDeckConfigFileForFolder(folder: TFolder): TFile | null {
-		const cfgPath = `${folder.path}/${folder.name}.flashcards`;
-		const cfg = this.app.vault.getAbstractFileByPath(cfgPath);
-		return cfg instanceof TFile ? cfg : null;
+		const candidates = [
+			`${folder.path}/${folder.name}.flashcards`,
+			`${folder.path}/${folder.name}.flashcards.md`,
+		];
+		for (const cfgPath of candidates) {
+			const cfg = this.app.vault.getAbstractFileByPath(cfgPath);
+			if (cfg instanceof TFile) return cfg;
+		}
+		return null;
 	}
 
 	private async getDeckDefinitionForFolder(
