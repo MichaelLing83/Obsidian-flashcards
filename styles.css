@@ -43,6 +43,13 @@
 	color: var(--text-muted);
 }
 
+.flashcard-error-link {
+	font-size: 0.9em;
+	text-decoration: underline;
+	color: var(--interactive-accent);
+	cursor: pointer;
+}
+
 /* ── Header ─────────────────────────────────────────────────────────────── */
 
 .flashcard-header {
