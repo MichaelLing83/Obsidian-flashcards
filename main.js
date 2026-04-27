@@ -69,6 +69,133 @@ function stripFrontmatter(raw) {
   if (end === -1) return raw;
   return raw.slice(end + 4).trim();
 }
+function parseTopLevelSections(markdown) {
+  const sections = /* @__PURE__ */ new Map();
+  const lines = stripFrontmatter(markdown).split("\n");
+  let currentTitle = "";
+  let buffer = [];
+  for (const line of lines) {
+    const h1 = line.match(/^#\s+(.+)$/);
+    if (h1) {
+      if (currentTitle) {
+        sections.set(currentTitle, buffer.join("\n").trim());
+      }
+      currentTitle = h1[1].trim();
+      buffer = [];
+      continue;
+    }
+    if (currentTitle) {
+      buffer.push(line);
+    }
+  }
+  if (currentTitle) {
+    sections.set(currentTitle, buffer.join("\n").trim());
+  }
+  return sections;
+}
+function normalizeSectionName(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+function parseDeckConfig(raw) {
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    return {
+      config: null,
+      error: "Invalid config JSON. Use a JSON object with requiredSections and instances."
+    };
+  }
+  if (!parsed || typeof parsed !== "object") {
+    return { config: null, error: "Config must be a JSON object." };
+  }
+  const obj = parsed;
+  if (!Array.isArray(obj.requiredSections) || obj.requiredSections.length === 0) {
+    return {
+      config: null,
+      error: "requiredSections must be a non-empty string array."
+    };
+  }
+  const requiredSections = obj.requiredSections.map((v) => normalizeSectionName(v)).filter((v) => v.length > 0);
+  if (requiredSections.length === 0) {
+    return {
+      config: null,
+      error: "requiredSections must contain at least one non-empty section name."
+    };
+  }
+  if (!Array.isArray(obj.instances) || obj.instances.length === 0) {
+    return {
+      config: null,
+      error: "instances must be a non-empty array."
+    };
+  }
+  const requiredSet = new Set(requiredSections);
+  const instances = [];
+  for (const item of obj.instances) {
+    let name = "";
+    let promptSection = "";
+    let answerSection = "";
+    if (Array.isArray(item) && item.length === 2) {
+      promptSection = normalizeSectionName(item[0]);
+      answerSection = normalizeSectionName(item[1]);
+    } else if (item && typeof item === "object") {
+      const cast = item;
+      name = normalizeSectionName(cast.name);
+      promptSection = normalizeSectionName(cast.promptSection);
+      answerSection = normalizeSectionName(cast.answerSection);
+    }
+    if (!promptSection || !answerSection) {
+      return {
+        config: null,
+        error: 'Each instance must define promptSection and answerSection (or use ["A", "B"] format).'
+      };
+    }
+    if (!requiredSet.has(promptSection) || !requiredSet.has(answerSection)) {
+      return {
+        config: null,
+        error: `Instance (${promptSection} -> ${answerSection}) must reference sections from requiredSections.`
+      };
+    }
+    instances.push({
+      name: name || void 0,
+      promptSection,
+      answerSection
+    });
+  }
+  return {
+    config: {
+      requiredSections,
+      instances
+    },
+    error: ""
+  };
+}
+var SelectionModal = class extends import_obsidian.SuggestModal {
+  constructor(app, items, placeholder, toLabel, toInfo, onChoose) {
+    super(app);
+    this.items = items;
+    this.toLabel = toLabel;
+    this.toInfo = toInfo;
+    this.onChoose = onChoose;
+    this.setPlaceholder(placeholder);
+  }
+  getSuggestions(query) {
+    const q = query.trim().toLowerCase();
+    if (!q) return this.items;
+    return this.items.filter(
+      (item) => this.toLabel(item).toLowerCase().includes(q)
+    );
+  }
+  renderSuggestion(item, el) {
+    el.createDiv({ text: this.toLabel(item) });
+    if (this.toInfo) {
+      el.createDiv({ cls: "suggestion-note", text: this.toInfo(item) });
+    }
+  }
+  onChooseSuggestion(item) {
+    this.onChoose(item);
+  }
+};
 var FlashcardView = class extends import_obsidian.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
@@ -76,7 +203,7 @@ var FlashcardView = class extends import_obsidian.ItemView {
     this.idx = 0;
     this.revealed = false;
     this.queueBuildError = "";
-    this.discoveredDeckCount = 0;
+    this.activeSelection = null;
     this.plugin = plugin;
   }
   getViewType() {
@@ -93,22 +220,36 @@ var FlashcardView = class extends import_obsidian.ItemView {
   }
   /** (Re-)build the study queue and render the first card. */
   async startSession() {
-    await this.buildQueue();
+    this.queueBuildError = "";
+    this.activeSelection = null;
+    const selected = await this.plugin.selectDeckInstanceForReview();
+    if (selected.error) {
+      this.queueBuildError = selected.error;
+      this.queue = [];
+      this.idx = 0;
+      this.revealed = false;
+      this.render();
+      return;
+    }
+    this.activeSelection = selected.selection;
+    if (!this.activeSelection) {
+      this.queueBuildError = "No deck mode selected.";
+      this.queue = [];
+      this.idx = 0;
+      this.revealed = false;
+      this.render();
+      return;
+    }
+    await this.buildQueue(this.activeSelection);
     this.idx = 0;
     this.revealed = false;
     this.render();
   }
   // ── Queue building ─────────────────────────────────────────────────────
-  async buildQueue() {
+  async buildQueue(selection) {
+    var _a, _b, _c, _d;
     const { newCardsPerDay, maxReviewsPerDay } = this.plugin.settings;
-    const deckDiscovery = this.plugin.discoverDeckFolders();
-    this.queueBuildError = deckDiscovery.error;
-    this.discoveredDeckCount = deckDiscovery.decks.length;
-    if (this.queueBuildError) {
-      this.queue = [];
-      return;
-    }
-    const files = deckDiscovery.decks.flatMap((deck) => this.collectMdFiles(deck));
+    const files = this.collectMdFiles(selection.deck.folder);
     if (files.length === 0) {
       this.queue = [];
       return;
@@ -116,48 +257,34 @@ var FlashcardView = class extends import_obsidian.ItemView {
     const now = Date.now();
     const due = [];
     for (const file of files) {
-      const cardType = this.resolveCardType(file);
-      const id = file.path;
+      const raw = await this.app.vault.read(file);
+      const sections = parseTopLevelSections(raw);
+      for (const required of selection.deck.config.requiredSections) {
+        if (!sections.has(required)) {
+          this.queueBuildError = `Missing required section "${required}" in ${file.path}. Every flashcard note in this deck must include all required sections.`;
+          this.queue = [];
+          return;
+        }
+      }
+      const front = (_b = (_a = sections.get(selection.instance.promptSection)) == null ? void 0 : _a.trim()) != null ? _b : "";
+      const back = (_d = (_c = sections.get(selection.instance.answerSection)) == null ? void 0 : _c.trim()) != null ? _d : "";
+      if (!front || !back) {
+        this.queueBuildError = `Cannot build card from ${file.path}: section "${selection.instance.promptSection}" or "${selection.instance.answerSection}" is empty.`;
+        this.queue = [];
+        return;
+      }
+      const id = this.plugin.buildCardId(selection.instanceKey, file.path);
       if (!this.plugin.cardData[id]) {
-        this.plugin.cardData[id] = this.makeRecord(
-          file.path,
-          cardType,
-          false,
-          now
-        );
-      } else {
-        this.plugin.cardData[id].cardType = cardType;
+        this.plugin.cardData[id] = this.makeRecord(file.path, now);
       }
       if (this.plugin.cardData[id].dueDate <= now) {
         due.push({
           id,
           file,
-          cardType,
-          isReversed: false,
-          isNew: this.plugin.cardData[id].repetitions === 0
+          isNew: this.plugin.cardData[id].repetitions === 0,
+          front,
+          back
         });
-      }
-      if (cardType === "basic_reversed") {
-        const revId = file.path + "::rev";
-        if (!this.plugin.cardData[revId]) {
-          this.plugin.cardData[revId] = this.makeRecord(
-            file.path,
-            cardType,
-            true,
-            now
-          );
-        } else {
-          this.plugin.cardData[revId].cardType = cardType;
-        }
-        if (this.plugin.cardData[revId].dueDate <= now) {
-          due.push({
-            id: revId,
-            file,
-            cardType,
-            isReversed: true,
-            isNew: this.plugin.cardData[revId].repetitions === 0
-          });
-        }
       }
     }
     await this.plugin.persistData();
@@ -167,11 +294,9 @@ var FlashcardView = class extends import_obsidian.ItemView {
     ).slice(0, maxReviewsPerDay);
     this.queue = [...newCards, ...reviews];
   }
-  makeRecord(path, cardType, isReversed, now) {
+  makeRecord(path, now) {
     return {
       path,
-      cardType,
-      isReversed,
       repetitions: 0,
       easeFactor: DEFAULT_EASE,
       interval: 1,
@@ -189,21 +314,6 @@ var FlashcardView = class extends import_obsidian.ItemView {
     }
     return files;
   }
-  /** Read card_type from YAML frontmatter, default to "basic". */
-  resolveCardType(file) {
-    var _a;
-    const fm = (_a = this.app.metadataCache.getFileCache(file)) == null ? void 0 : _a.frontmatter;
-    return (fm == null ? void 0 : fm.card_type) === "basic_reversed" ? "basic_reversed" : "basic";
-  }
-  /** Return the front and back strings for a note. */
-  async getContent(file) {
-    var _a;
-    const fm = (_a = this.app.metadataCache.getFileCache(file)) == null ? void 0 : _a.frontmatter;
-    const raw = await this.app.vault.read(file);
-    const front = (fm == null ? void 0 : fm.card_front) ? String(fm.card_front) : file.basename;
-    const back = stripFrontmatter(raw);
-    return { front, back };
-  }
   // ── Rendering ─────────────────────────────────────────────────────────
   render() {
     const el = this.contentEl;
@@ -218,19 +328,11 @@ var FlashcardView = class extends import_obsidian.ItemView {
       return;
     }
     if (this.queue.length === 0) {
-      if (this.discoveredDeckCount === 0) {
-        this.renderMessage(
-          el,
-          "\u{1F4C2} No flashcard decks found",
-          "Add frontmatter (flashcards: true / card_type / card_front) to at least one Markdown file in a folder to mark it as a deck."
-        );
-      } else {
-        this.renderMessage(
-          el,
-          "\u{1F389} All caught up!",
-          "No cards are due for review right now."
-        );
-      }
+      this.renderMessage(
+        el,
+        "\u{1F389} All caught up!",
+        "No cards are due for review right now."
+      );
       return;
     }
     if (this.idx >= this.queue.length) {
@@ -264,9 +366,11 @@ var FlashcardView = class extends import_obsidian.ItemView {
     btn.addEventListener("click", () => void this.startSession());
   }
   async renderCard(el) {
+    var _a, _b, _c, _d;
     const card = this.queue[this.idx];
     const rec = this.plugin.cardData[card.id];
-    const { front, back } = await this.getContent(card.file);
+    const front = card.front;
+    const back = card.back;
     const header = el.createDiv({ cls: "flashcard-header" });
     const progRow = header.createDiv({ cls: "flashcard-progress-row" });
     progRow.createSpan({
@@ -281,7 +385,7 @@ var FlashcardView = class extends import_obsidian.ItemView {
       }
     });
     const meta = header.createDiv({ cls: "flashcard-meta" });
-    const typeLabel = card.isReversed ? "Basic (Reversed)" : card.cardType === "basic_reversed" ? "Basic + Reversed" : "Basic";
+    const typeLabel = this.activeSelection ? this.plugin.getInstanceLabel(this.activeSelection.instance) : "Deck";
     meta.createSpan({ cls: "flashcard-type-label", text: typeLabel });
     if (rec.repetitions === 0) {
       meta.createSpan({ cls: "flashcard-badge flashcard-badge-new", text: "New" });
@@ -295,27 +399,19 @@ var FlashcardView = class extends import_obsidian.ItemView {
     const frontSide = cardEl.createDiv({ cls: "flashcard-side" });
     frontSide.createDiv({
       cls: "flashcard-side-label",
-      text: card.isReversed ? "Back" : "Front"
+      text: (_b = (_a = this.activeSelection) == null ? void 0 : _a.instance.promptSection) != null ? _b : "Front"
     });
     const frontContent = frontSide.createDiv({ cls: "flashcard-content" });
-    await this.renderMarkdown(
-      card.isReversed ? back : front,
-      frontContent,
-      card.file.path
-    );
+    await this.renderMarkdown(front, frontContent, card.file.path);
     if (this.revealed) {
       cardEl.createDiv({ cls: "flashcard-divider" });
       const backSide = cardEl.createDiv({ cls: "flashcard-side" });
       backSide.createDiv({
         cls: "flashcard-side-label",
-        text: card.isReversed ? "Front" : "Back"
+        text: (_d = (_c = this.activeSelection) == null ? void 0 : _c.instance.answerSection) != null ? _d : "Back"
       });
       const backContent = backSide.createDiv({ cls: "flashcard-content" });
-      await this.renderMarkdown(
-        card.isReversed ? front : back,
-        backContent,
-        card.file.path
-      );
+      await this.renderMarkdown(back, backContent, card.file.path);
     }
     const footer = el.createDiv({ cls: "flashcard-footer" });
     if (!this.revealed) {
@@ -389,20 +485,20 @@ var FlashcardsSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.persistData();
       })
     );
-    containerEl.createEl("h3", { text: "Card Format" });
+    containerEl.createEl("h3", { text: "Deck Config File" });
     const desc = containerEl.createEl("p", {
       cls: "setting-item-description"
     });
-    desc.textContent = "Any folder that contains at least one configured markdown file becomes a deck. Use YAML frontmatter to mark/configure cards:";
+    desc.textContent = "Each deck folder must contain a config file named <deck_dir>.flashcards in JSON format.";
     const ul = containerEl.createEl("ul");
     ul.createEl("li", {
-      text: "flashcards: true \u2014 marks this file's folder as a flashcard deck."
+      text: "Config filename must match folder name, e.g. deck_dir/deck_dir.flashcards."
     });
     ul.createEl("li", {
-      text: 'card_front: "Question text" \u2014 overrides the filename as the front.'
+      text: "requiredSections defines mandatory H1 sections in every card note."
     });
     ul.createEl("li", {
-      text: "card_type: basic_reversed \u2014 creates two cards (Front\u2192Back and Back\u2192Front)."
+      text: "instances define prompt/answer section pairs, each becoming a study mode."
     });
     ul.createEl("li", {
       text: "Nested decks are not allowed: if a deck folder has a child deck folder, the plugin will stop and show an error."
@@ -410,12 +506,26 @@ var FlashcardsSettingTab = class extends import_obsidian.PluginSettingTab {
     containerEl.createEl("h4", { text: "Example" });
     containerEl.createEl("pre").createEl("code", {
       text: [
-        "---",
-        "flashcards: true",
-        "card_type: basic_reversed",
-        "card_front: What is the capital of France?",
-        "---",
-        "Paris"
+        "{",
+        '  "requiredSections": ["A", "B", "C"],',
+        '  "instances": [',
+        '    ["A", "B"],',
+        '    { "name": "B-to-C", "promptSection": "B", "answerSection": "C" }',
+        "  ]",
+        "}"
+      ].join("\n")
+    });
+    containerEl.createEl("h4", { text: "Card Note Example" });
+    containerEl.createEl("pre").createEl("code", {
+      text: [
+        "# A",
+        "Prompt content",
+        "",
+        "# B",
+        "Expected answer",
+        "",
+        "# C",
+        "Extra context"
       ].join("\n")
     });
   }
@@ -474,40 +584,117 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
     await leaf.setViewState({ type: VIEW_TYPE_FLASHCARD, active: true });
     workspace.revealLeaf(leaf);
   }
-  isConfiguredFlashcardFile(file) {
-    var _a;
-    if (file.extension !== "md") return false;
-    const fm = (_a = this.app.metadataCache.getFileCache(file)) == null ? void 0 : _a.frontmatter;
-    if (!fm) return false;
-    return fm.flashcards === true || typeof fm.card_type !== "undefined" || typeof fm.card_front !== "undefined";
+  buildCardId(instanceKey, notePath) {
+    return `${instanceKey}::${notePath}`;
   }
   isDescendantFolder(parentPath, childPath) {
     if (parentPath === childPath) return false;
     if (parentPath === "") return childPath !== "";
     return childPath.startsWith(`${parentPath}/`);
   }
-  discoverDeckFolders() {
-    const decksByPath = /* @__PURE__ */ new Map();
-    for (const file of this.app.vault.getMarkdownFiles()) {
-      if (!this.isConfiguredFlashcardFile(file)) continue;
-      if (!file.parent) continue;
-      decksByPath.set(file.parent.path, file.parent);
+  getInstanceLabel(instance) {
+    return instance.name || `${instance.promptSection} -> ${instance.answerSection}`;
+  }
+  getInstanceKey(deckPath, instance) {
+    return `${deckPath}::${instance.promptSection}->${instance.answerSection}`;
+  }
+  isDeckConfigFile(file) {
+    if (!file.parent) return false;
+    if (file.extension !== "flashcards") return false;
+    return file.basename === file.parent.name;
+  }
+  async discoverDeckDefinitions() {
+    const configFiles = this.app.vault.getFiles().filter((f) => this.isDeckConfigFile(f));
+    if (configFiles.length === 0) {
+      return {
+        decks: [],
+        error: "No deck config found. Add <deck_dir>.flashcards in your deck folder."
+      };
     }
-    const decks = [...decksByPath.values()].sort(
-      (a, b) => a.path.length - b.path.length
-    );
+    const decks = [];
+    for (const configFile of configFiles) {
+      if (!(configFile.parent instanceof import_obsidian.TFolder)) continue;
+      const raw = await this.app.vault.read(configFile);
+      const parsed = parseDeckConfig(raw);
+      if (!parsed.config) {
+        return {
+          decks: [],
+          error: `Config error in ${configFile.path}: ${parsed.error}`
+        };
+      }
+      decks.push({
+        folder: configFile.parent,
+        configFile,
+        config: parsed.config
+      });
+    }
+    decks.sort((a, b) => a.folder.path.length - b.folder.path.length);
     for (let i = 0; i < decks.length; i++) {
       for (let j = i + 1; j < decks.length; j++) {
-        if (this.isDescendantFolder(decks[i].path, decks[j].path)) {
-          const parent = decks[i].path || "/";
-          const child = decks[j].path || "/";
+        if (this.isDescendantFolder(decks[i].folder.path, decks[j].folder.path)) {
           return {
             decks: [],
-            error: `Nested deck folders are not allowed: "${parent}" contains child deck "${child}". Remove one deck marker and retry.`
+            error: `Nested deck folders are not allowed: "${decks[i].folder.path}" contains child deck "${decks[j].folder.path}".`
           };
         }
       }
     }
     return { decks, error: "" };
+  }
+  async pickOne(items, placeholder, toLabel, toInfo) {
+    if (items.length === 0) return null;
+    if (items.length === 1) return items[0];
+    return await new Promise((resolve) => {
+      let resolved = false;
+      const modal = new SelectionModal(
+        this.app,
+        items,
+        placeholder,
+        toLabel,
+        toInfo,
+        (item) => {
+          resolved = true;
+          resolve(item);
+        }
+      );
+      const close = modal.onClose.bind(modal);
+      modal.onClose = () => {
+        close();
+        if (!resolved) resolve(null);
+      };
+      modal.open();
+    });
+  }
+  async selectDeckInstanceForReview() {
+    const discovered = await this.discoverDeckDefinitions();
+    if (discovered.error) {
+      return { selection: null, error: discovered.error };
+    }
+    const deck = await this.pickOne(
+      discovered.decks,
+      "Select a deck folder",
+      (item) => item.folder.path,
+      (item) => item.configFile.name
+    );
+    if (!deck) {
+      return { selection: null, error: "Deck selection cancelled." };
+    }
+    const instance = await this.pickOne(
+      deck.config.instances,
+      "Select a deck mode",
+      (item) => this.getInstanceLabel(item),
+      (item) => `${item.promptSection} -> ${item.answerSection}`
+    );
+    if (!instance) {
+      return { selection: null, error: "Deck mode selection cancelled." };
+    }
+    return {
+      selection: {
+        deck,
+        instance,
+        instanceKey: this.getInstanceKey(deck.folder.path, instance)
+      },
+      error: ""
+    };
   }
 };

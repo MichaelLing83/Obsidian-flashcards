@@ -5,6 +5,7 @@ import {
 	Plugin,
 	PluginSettingTab,
 	Setting,
+	SuggestModal,
 	TFile,
 	TFolder,
 	WorkspaceLeaf,
@@ -13,9 +14,6 @@ import {
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
-
-/** Two card types, inspired by AnkiDroid. */
-type CardType = "basic" | "basic_reversed";
 
 /**
  * Rating given by the learner after reviewing a card.
@@ -30,9 +28,6 @@ type Rating = 0 | 1 | 2 | 3;
 interface CardRecord {
 	/** Path of the source note file. */
 	path: string;
-	cardType: CardType;
-	/** true when this record represents the reversed side of a basic_reversed card. */
-	isReversed: boolean;
 	/** Number of successful consecutive reviews. */
 	repetitions: number;
 	/** SM-2 ease factor (starts at 2.5). */
@@ -47,6 +42,34 @@ interface CardRecord {
 interface PluginStoredData {
 	settings: FlashcardsSettings;
 	cards: Record<string, CardRecord>;
+}
+
+interface DeckInstanceConfig {
+	name?: string;
+	promptSection: string;
+	answerSection: string;
+}
+
+interface DeckConfig {
+	requiredSections: string[];
+	instances: DeckInstanceConfig[];
+}
+
+interface DeckDefinition {
+	folder: TFolder;
+	configFile: TFile;
+	config: DeckConfig;
+}
+
+interface DeckInstanceSelection {
+	deck: DeckDefinition;
+	instance: DeckInstanceConfig;
+	instanceKey: string;
+}
+
+interface DeckSelectionResult {
+	selection: DeckInstanceSelection | null;
+	error: string;
 }
 
 interface FlashcardsSettings {
@@ -120,18 +143,194 @@ function stripFrontmatter(raw: string): string {
 	return raw.slice(end + 4).trim();
 }
 
+/** Parse top-level markdown sections (H1 headings) into a map. */
+function parseTopLevelSections(markdown: string): Map<string, string> {
+	const sections = new Map<string, string>();
+	const lines = stripFrontmatter(markdown).split("\n");
+
+	let currentTitle = "";
+	let buffer: string[] = [];
+
+	for (const line of lines) {
+		const h1 = line.match(/^#\s+(.+)$/);
+		if (h1) {
+			if (currentTitle) {
+				sections.set(currentTitle, buffer.join("\n").trim());
+			}
+			currentTitle = h1[1].trim();
+			buffer = [];
+			continue;
+		}
+		if (currentTitle) {
+			buffer.push(line);
+		}
+	}
+
+	if (currentTitle) {
+		sections.set(currentTitle, buffer.join("\n").trim());
+	}
+
+	return sections;
+}
+
+function normalizeSectionName(value: unknown): string {
+	return typeof value === "string" ? value.trim() : "";
+}
+
+function parseDeckConfig(raw: string): { config: DeckConfig | null; error: string } {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		return {
+			config: null,
+			error:
+				"Invalid config JSON. Use a JSON object with requiredSections and instances.",
+		};
+	}
+
+	if (!parsed || typeof parsed !== "object") {
+		return { config: null, error: "Config must be a JSON object." };
+	}
+
+	const obj = parsed as {
+		requiredSections?: unknown;
+		instances?: unknown;
+	};
+
+	if (!Array.isArray(obj.requiredSections) || obj.requiredSections.length === 0) {
+		return {
+			config: null,
+			error: "requiredSections must be a non-empty string array.",
+		};
+	}
+
+	const requiredSections = obj.requiredSections
+		.map((v) => normalizeSectionName(v))
+		.filter((v) => v.length > 0);
+
+	if (requiredSections.length === 0) {
+		return {
+			config: null,
+			error: "requiredSections must contain at least one non-empty section name.",
+		};
+	}
+
+	if (!Array.isArray(obj.instances) || obj.instances.length === 0) {
+		return {
+			config: null,
+			error: "instances must be a non-empty array.",
+		};
+	}
+
+	const requiredSet = new Set(requiredSections);
+	const instances: DeckInstanceConfig[] = [];
+
+	for (const item of obj.instances) {
+		let name = "";
+		let promptSection = "";
+		let answerSection = "";
+
+		if (Array.isArray(item) && item.length === 2) {
+			promptSection = normalizeSectionName(item[0]);
+			answerSection = normalizeSectionName(item[1]);
+		} else if (item && typeof item === "object") {
+			const cast = item as {
+				name?: unknown;
+				promptSection?: unknown;
+				answerSection?: unknown;
+			};
+			name = normalizeSectionName(cast.name);
+			promptSection = normalizeSectionName(cast.promptSection);
+			answerSection = normalizeSectionName(cast.answerSection);
+		}
+
+		if (!promptSection || !answerSection) {
+			return {
+				config: null,
+				error:
+					"Each instance must define promptSection and answerSection (or use [\"A\", \"B\"] format).",
+			};
+		}
+
+		if (!requiredSet.has(promptSection) || !requiredSet.has(answerSection)) {
+			return {
+				config: null,
+				error:
+					`Instance (${promptSection} -> ${answerSection}) must reference sections from requiredSections.`,
+			};
+		}
+
+		instances.push({
+			name: name || undefined,
+			promptSection,
+			answerSection,
+		});
+	}
+
+	return {
+		config: {
+			requiredSections,
+			instances,
+		},
+		error: "",
+	};
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Flashcard View
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** A card scheduled for the current study session. */
 interface StudyCard {
-	/** Storage key in plugin.cardData (path or path+"::rev"). */
+	/** Storage key in plugin.cardData, scoped to selected deck instance. */
 	id: string;
 	file: TFile;
-	cardType: CardType;
-	isReversed: boolean;
 	isNew: boolean;
+	front: string;
+	back: string;
+}
+
+class SelectionModal<T> extends SuggestModal<T> {
+	private readonly items: T[];
+	private readonly toLabel: (item: T) => string;
+	private readonly toInfo?: (item: T) => string;
+	private readonly onChoose: (item: T) => void;
+
+	constructor(
+		app: App,
+		items: T[],
+		placeholder: string,
+		toLabel: (item: T) => string,
+		toInfo: ((item: T) => string) | undefined,
+		onChoose: (item: T) => void,
+	) {
+		super(app);
+		this.items = items;
+		this.toLabel = toLabel;
+		this.toInfo = toInfo;
+		this.onChoose = onChoose;
+		this.setPlaceholder(placeholder);
+	}
+
+	getSuggestions(query: string): T[] {
+		const q = query.trim().toLowerCase();
+		if (!q) return this.items;
+		return this.items.filter((item) =>
+			this.toLabel(item).toLowerCase().includes(q),
+		);
+	}
+
+	renderSuggestion(item: T, el: HTMLElement): void {
+		el.createDiv({ text: this.toLabel(item) });
+		if (this.toInfo) {
+			el.createDiv({ cls: "suggestion-note", text: this.toInfo(item) });
+		}
+	}
+
+	onChooseSuggestion(item: T): void {
+		this.onChoose(item);
+	}
 }
 
 export class FlashcardView extends ItemView {
@@ -140,7 +339,7 @@ export class FlashcardView extends ItemView {
 	private idx = 0;
 	private revealed = false;
 	private queueBuildError = "";
-	private discoveredDeckCount = 0;
+	private activeSelection: DeckInstanceSelection | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: FlashcardsPlugin) {
 		super(leaf);
@@ -163,7 +362,29 @@ export class FlashcardView extends ItemView {
 
 	/** (Re-)build the study queue and render the first card. */
 	async startSession(): Promise<void> {
-		await this.buildQueue();
+		this.queueBuildError = "";
+		this.activeSelection = null;
+		const selected = await this.plugin.selectDeckInstanceForReview();
+		if (selected.error) {
+			this.queueBuildError = selected.error;
+			this.queue = [];
+			this.idx = 0;
+			this.revealed = false;
+			this.render();
+			return;
+		}
+
+		this.activeSelection = selected.selection;
+		if (!this.activeSelection) {
+			this.queueBuildError = "No deck mode selected.";
+			this.queue = [];
+			this.idx = 0;
+			this.revealed = false;
+			this.render();
+			return;
+		}
+
+		await this.buildQueue(this.activeSelection);
 		this.idx = 0;
 		this.revealed = false;
 		this.render();
@@ -171,18 +392,9 @@ export class FlashcardView extends ItemView {
 
 	// ── Queue building ─────────────────────────────────────────────────────
 
-	private async buildQueue(): Promise<void> {
+	private async buildQueue(selection: DeckInstanceSelection): Promise<void> {
 		const { newCardsPerDay, maxReviewsPerDay } = this.plugin.settings;
-		const deckDiscovery = this.plugin.discoverDeckFolders();
-
-		this.queueBuildError = deckDiscovery.error;
-		this.discoveredDeckCount = deckDiscovery.decks.length;
-		if (this.queueBuildError) {
-			this.queue = [];
-			return;
-		}
-
-		const files = deckDiscovery.decks.flatMap((deck) => this.collectMdFiles(deck));
+		const files = this.collectMdFiles(selection.deck.folder);
 		if (files.length === 0) {
 			this.queue = [];
 			return;
@@ -192,52 +404,42 @@ export class FlashcardView extends ItemView {
 		const due: StudyCard[] = [];
 
 		for (const file of files) {
-			const cardType = this.resolveCardType(file);
+			const raw = await this.app.vault.read(file);
+			const sections = parseTopLevelSections(raw);
 
-			// ── Forward card ──────────────────────────────────────────────
-			const id = file.path;
-			if (!this.plugin.cardData[id]) {
-				this.plugin.cardData[id] = this.makeRecord(
-					file.path,
-					cardType,
-					false,
-					now,
-				);
-			} else {
-				this.plugin.cardData[id].cardType = cardType;
+			for (const required of selection.deck.config.requiredSections) {
+				if (!sections.has(required)) {
+					this.queueBuildError =
+						`Missing required section \"${required}\" in ${file.path}. ` +
+						"Every flashcard note in this deck must include all required sections.";
+					this.queue = [];
+					return;
+				}
 			}
+
+			const front = sections.get(selection.instance.promptSection)?.trim() ?? "";
+			const back = sections.get(selection.instance.answerSection)?.trim() ?? "";
+			if (!front || !back) {
+				this.queueBuildError =
+					`Cannot build card from ${file.path}: ` +
+					`section \"${selection.instance.promptSection}\" or \"${selection.instance.answerSection}\" is empty.`;
+				this.queue = [];
+				return;
+			}
+
+			const id = this.plugin.buildCardId(selection.instanceKey, file.path);
+			if (!this.plugin.cardData[id]) {
+				this.plugin.cardData[id] = this.makeRecord(file.path, now);
+			}
+
 			if (this.plugin.cardData[id].dueDate <= now) {
 				due.push({
 					id,
 					file,
-					cardType,
-					isReversed: false,
 					isNew: this.plugin.cardData[id].repetitions === 0,
+					front,
+					back,
 				});
-			}
-
-			// ── Reversed card (only for basic_reversed) ───────────────────
-			if (cardType === "basic_reversed") {
-				const revId = file.path + "::rev";
-				if (!this.plugin.cardData[revId]) {
-					this.plugin.cardData[revId] = this.makeRecord(
-						file.path,
-						cardType,
-						true,
-						now,
-					);
-				} else {
-					this.plugin.cardData[revId].cardType = cardType;
-				}
-				if (this.plugin.cardData[revId].dueDate <= now) {
-					due.push({
-						id: revId,
-						file,
-						cardType,
-						isReversed: true,
-						isNew: this.plugin.cardData[revId].repetitions === 0,
-					});
-				}
 			}
 		}
 
@@ -261,14 +463,10 @@ export class FlashcardView extends ItemView {
 
 	private makeRecord(
 		path: string,
-		cardType: CardType,
-		isReversed: boolean,
 		now: number,
 	): CardRecord {
 		return {
 			path,
-			cardType,
-			isReversed,
 			repetitions: 0,
 			easeFactor: DEFAULT_EASE,
 			interval: 1,
@@ -288,23 +486,6 @@ export class FlashcardView extends ItemView {
 		return files;
 	}
 
-	/** Read card_type from YAML frontmatter, default to "basic". */
-	private resolveCardType(file: TFile): CardType {
-		const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
-		return fm?.card_type === "basic_reversed" ? "basic_reversed" : "basic";
-	}
-
-	/** Return the front and back strings for a note. */
-	private async getContent(
-		file: TFile,
-	): Promise<{ front: string; back: string }> {
-		const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
-		const raw = await this.app.vault.read(file);
-		const front = fm?.card_front ? String(fm.card_front) : file.basename;
-		const back = stripFrontmatter(raw);
-		return { front, back };
-	}
-
 	// ── Rendering ─────────────────────────────────────────────────────────
 
 	private render(): void {
@@ -322,19 +503,11 @@ export class FlashcardView extends ItemView {
 		}
 
 		if (this.queue.length === 0) {
-			if (this.discoveredDeckCount === 0) {
-				this.renderMessage(
-					el,
-					"📂 No flashcard decks found",
-					"Add frontmatter (flashcards: true / card_type / card_front) to at least one Markdown file in a folder to mark it as a deck.",
-				);
-			} else {
-				this.renderMessage(
-					el,
-					"🎉 All caught up!",
-					"No cards are due for review right now.",
-				);
-			}
+			this.renderMessage(
+				el,
+				"🎉 All caught up!",
+				"No cards are due for review right now.",
+			);
 			return;
 		}
 
@@ -380,7 +553,8 @@ export class FlashcardView extends ItemView {
 	private async renderCard(el: HTMLElement): Promise<void> {
 		const card = this.queue[this.idx];
 		const rec = this.plugin.cardData[card.id];
-		const { front, back } = await this.getContent(card.file);
+		const front = card.front;
+		const back = card.back;
 
 		// ── Header ──────────────────────────────────────────────────────
 		const header = el.createDiv({ cls: "flashcard-header" });
@@ -402,11 +576,9 @@ export class FlashcardView extends ItemView {
 
 		// Meta row: card type + new/review badge
 		const meta = header.createDiv({ cls: "flashcard-meta" });
-		const typeLabel = card.isReversed
-			? "Basic (Reversed)"
-			: card.cardType === "basic_reversed"
-			? "Basic + Reversed"
-			: "Basic";
+		const typeLabel = this.activeSelection
+			? this.plugin.getInstanceLabel(this.activeSelection.instance)
+			: "Deck";
 		meta.createSpan({ cls: "flashcard-type-label", text: typeLabel });
 		if (rec.repetitions === 0) {
 			meta.createSpan({ cls: "flashcard-badge flashcard-badge-new", text: "New" });
@@ -424,14 +596,10 @@ export class FlashcardView extends ItemView {
 		const frontSide = cardEl.createDiv({ cls: "flashcard-side" });
 		frontSide.createDiv({
 			cls: "flashcard-side-label",
-			text: card.isReversed ? "Back" : "Front",
+			text: this.activeSelection?.instance.promptSection ?? "Front",
 		});
 		const frontContent = frontSide.createDiv({ cls: "flashcard-content" });
-		await this.renderMarkdown(
-			card.isReversed ? back : front,
-			frontContent,
-			card.file.path,
-		);
+		await this.renderMarkdown(front, frontContent, card.file.path);
 
 		// Revealed answer
 		if (this.revealed) {
@@ -439,14 +607,10 @@ export class FlashcardView extends ItemView {
 			const backSide = cardEl.createDiv({ cls: "flashcard-side" });
 			backSide.createDiv({
 				cls: "flashcard-side-label",
-				text: card.isReversed ? "Front" : "Back",
+				text: this.activeSelection?.instance.answerSection ?? "Back",
 			});
 			const backContent = backSide.createDiv({ cls: "flashcard-content" });
-			await this.renderMarkdown(
-				card.isReversed ? front : back,
-				backContent,
-				card.file.path,
-			);
+			await this.renderMarkdown(back, backContent, card.file.path);
 		}
 
 		// ── Footer ───────────────────────────────────────────────────────
@@ -558,23 +722,22 @@ class FlashcardsSettingTab extends PluginSettingTab {
 			);
 
 		// Help section
-		containerEl.createEl("h3", { text: "Card Format" });
+		containerEl.createEl("h3", { text: "Deck Config File" });
 		const desc = containerEl.createEl("p", {
 			cls: "setting-item-description",
 		});
 		desc.textContent =
-			"Any folder that contains at least one configured markdown file becomes a deck. " +
-			"Use YAML frontmatter to mark/configure cards:";
+			"Each deck folder must contain a config file named <deck_dir>.flashcards in JSON format.";
 
 		const ul = containerEl.createEl("ul");
 		ul.createEl("li", {
-			text: "flashcards: true — marks this file's folder as a flashcard deck.",
+			text: "Config filename must match folder name, e.g. deck_dir/deck_dir.flashcards.",
 		});
 		ul.createEl("li", {
-			text: "card_front: \"Question text\" — overrides the filename as the front.",
+			text: "requiredSections defines mandatory H1 sections in every card note.",
 		});
 		ul.createEl("li", {
-			text: "card_type: basic_reversed — creates two cards (Front→Back and Back→Front).",
+			text: "instances define prompt/answer section pairs, each becoming a study mode.",
 		});
 		ul.createEl("li", {
 			text: "Nested decks are not allowed: if a deck folder has a child deck folder, the plugin will stop and show an error.",
@@ -583,12 +746,27 @@ class FlashcardsSettingTab extends PluginSettingTab {
 		containerEl.createEl("h4", { text: "Example" });
 		containerEl.createEl("pre").createEl("code", {
 			text: [
-				"---",
-					"flashcards: true",
-				"card_type: basic_reversed",
-				"card_front: What is the capital of France?",
-				"---",
-				"Paris",
+				"{",
+				"  \"requiredSections\": [\"A\", \"B\", \"C\"],",
+				"  \"instances\": [",
+				"    [\"A\", \"B\"],",
+				"    { \"name\": \"B-to-C\", \"promptSection\": \"B\", \"answerSection\": \"C\" }",
+				"  ]",
+				"}",
+			].join("\n"),
+		});
+
+		containerEl.createEl("h4", { text: "Card Note Example" });
+		containerEl.createEl("pre").createEl("code", {
+			text: [
+				"# A",
+				"Prompt content",
+				"",
+				"# B",
+				"Expected answer",
+				"",
+				"# C",
+				"Extra context",
 			].join("\n"),
 		});
 	}
@@ -660,15 +838,8 @@ export default class FlashcardsPlugin extends Plugin {
 		workspace.revealLeaf(leaf);
 	}
 
-	private isConfiguredFlashcardFile(file: TFile): boolean {
-		if (file.extension !== "md") return false;
-		const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
-		if (!fm) return false;
-		return (
-			fm.flashcards === true ||
-			typeof fm.card_type !== "undefined" ||
-			typeof fm.card_front !== "undefined"
-		);
+	buildCardId(instanceKey: string, notePath: string): string {
+		return `${instanceKey}::${notePath}`;
 	}
 
 	private isDescendantFolder(parentPath: string, childPath: string): boolean {
@@ -677,32 +848,135 @@ export default class FlashcardsPlugin extends Plugin {
 		return childPath.startsWith(`${parentPath}/`);
 	}
 
-	discoverDeckFolders(): { decks: TFolder[]; error: string } {
-		const decksByPath = new Map<string, TFolder>();
-		for (const file of this.app.vault.getMarkdownFiles()) {
-			if (!this.isConfiguredFlashcardFile(file)) continue;
-			if (!file.parent) continue;
-			decksByPath.set(file.parent.path, file.parent);
+	getInstanceLabel(instance: DeckInstanceConfig): string {
+		return instance.name || `${instance.promptSection} -> ${instance.answerSection}`;
+	}
+
+	private getInstanceKey(deckPath: string, instance: DeckInstanceConfig): string {
+		return `${deckPath}::${instance.promptSection}->${instance.answerSection}`;
+	}
+
+	private isDeckConfigFile(file: TFile): boolean {
+		if (!file.parent) return false;
+		if (file.extension !== "flashcards") return false;
+		return file.basename === file.parent.name;
+	}
+
+	private async discoverDeckDefinitions(): Promise<{
+		decks: DeckDefinition[];
+		error: string;
+	}> {
+		const configFiles = this.app.vault
+			.getFiles()
+			.filter((f) => this.isDeckConfigFile(f));
+
+		if (configFiles.length === 0) {
+			return {
+				decks: [],
+				error:
+					"No deck config found. Add <deck_dir>.flashcards in your deck folder.",
+			};
 		}
 
-		const decks = [...decksByPath.values()].sort(
-			(a, b) => a.path.length - b.path.length,
-		);
+		const decks: DeckDefinition[] = [];
+		for (const configFile of configFiles) {
+			if (!(configFile.parent instanceof TFolder)) continue;
+			const raw = await this.app.vault.read(configFile);
+			const parsed = parseDeckConfig(raw);
+			if (!parsed.config) {
+				return {
+					decks: [],
+					error: `Config error in ${configFile.path}: ${parsed.error}`,
+				};
+			}
 
+			decks.push({
+				folder: configFile.parent,
+				configFile,
+				config: parsed.config,
+			});
+		}
+
+		decks.sort((a, b) => a.folder.path.length - b.folder.path.length);
 		for (let i = 0; i < decks.length; i++) {
 			for (let j = i + 1; j < decks.length; j++) {
-				if (this.isDescendantFolder(decks[i].path, decks[j].path)) {
-					const parent = decks[i].path || "/";
-					const child = decks[j].path || "/";
+				if (this.isDescendantFolder(decks[i].folder.path, decks[j].folder.path)) {
 					return {
 						decks: [],
 						error:
-							`Nested deck folders are not allowed: "${parent}" contains child deck "${child}". Remove one deck marker and retry.`,
+							`Nested deck folders are not allowed: "${decks[i].folder.path}" contains child deck "${decks[j].folder.path}".`,
 					};
 				}
 			}
 		}
 
 		return { decks, error: "" };
+	}
+
+	private async pickOne<T>(
+		items: T[],
+		placeholder: string,
+		toLabel: (item: T) => string,
+		toInfo?: (item: T) => string,
+	): Promise<T | null> {
+		if (items.length === 0) return null;
+		if (items.length === 1) return items[0];
+
+		return await new Promise<T | null>((resolve) => {
+			let resolved = false;
+			const modal = new SelectionModal<T>(
+				this.app,
+				items,
+				placeholder,
+				toLabel,
+				toInfo,
+				(item) => {
+					resolved = true;
+					resolve(item);
+				},
+			);
+			const close = modal.onClose.bind(modal);
+			modal.onClose = () => {
+				close();
+				if (!resolved) resolve(null);
+			};
+			modal.open();
+		});
+	}
+
+	async selectDeckInstanceForReview(): Promise<DeckSelectionResult> {
+		const discovered = await this.discoverDeckDefinitions();
+		if (discovered.error) {
+			return { selection: null, error: discovered.error };
+		}
+
+		const deck = await this.pickOne(
+			discovered.decks,
+			"Select a deck folder",
+			(item) => item.folder.path,
+			(item) => item.configFile.name,
+		);
+		if (!deck) {
+			return { selection: null, error: "Deck selection cancelled." };
+		}
+
+		const instance = await this.pickOne(
+			deck.config.instances,
+			"Select a deck mode",
+			(item) => this.getInstanceLabel(item),
+			(item) => `${item.promptSection} -> ${item.answerSection}`,
+		);
+		if (!instance) {
+			return { selection: null, error: "Deck mode selection cancelled." };
+		}
+
+		return {
+			selection: {
+				deck,
+				instance,
+				instanceKey: this.getInstanceKey(deck.folder.path, instance),
+			},
+			error: "",
+		};
 	}
 }

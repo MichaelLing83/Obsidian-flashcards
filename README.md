@@ -1,66 +1,89 @@
 # Obsidian Flashcards
 
-An Obsidian plugin that turns any vault folder into a flashcard deck with **spaced-repetition** (SM-2 algorithm), inspired by AnkiDroid.
+An Obsidian plugin for spaced repetition (SM-2) with deck schemas driven by per-folder config files.
 
 ## Features
 
-- **Automatic deck discovery** — any folder with at least one configured Markdown file becomes a deck.
-- **Two card types**
-  - **Basic** — Front → Back (one direction).
-  - **Basic + Reversed** — generates two cards per note (Front→Back *and* Back→Front).
-- **SM-2 spaced repetition** — four rating buttons (Again / Hard / Good / Easy) with next-due-date previews.
-- **Daily limits** — configure max new cards and max reviews per session.
-- **Clean study UI** — progress bar, card-type badge, rendered Markdown on both sides.
-- **Folder context menu** — right-click any folder → *Set as Flashcard Deck*.
-- **Persistent data** — review history saved automatically in `data.json`.
-- **Nested deck protection** — parent/child deck folders are rejected to avoid scheduling conflicts.
+- Config-file based deck discovery using `<deck_dir>.flashcards`.
+- Required section schema per deck (default section parsing uses H1 headings like `# A`).
+- Multiple study modes from one card schema (for example `A -> B`, `B -> C`).
+- Separate memory history per mode, even for the same note.
+- Deck picker and mode picker before each review session.
+- Nested deck protection (parent/child deck directories are rejected).
+- Daily limits for new cards and review cards.
 
-## Card Format
+## Deck Config
 
-Each `.md` file is one card. The default front is the **filename** and the default back is the **file content**.
+If a deck folder is named `deck_dir`, the config file must be named:
 
-Any folder that contains at least one file with flashcard frontmatter is treated as a deck.
+`deck_dir/deck_dir.flashcards`
 
-Use YAML frontmatter to customise:
+Config format is JSON:
 
-```yaml
----
-flashcards: true
-card_type: basic_reversed      # omit or "basic" for one-way cards
-card_front: What is the capital of France?
----
-Paris
+```json
+{
+  "requiredSections": ["A", "B", "C"],
+  "instances": [
+    ["A", "B"],
+    { "name": "B-to-C", "promptSection": "B", "answerSection": "C" }
+  ]
+}
 ```
 
-| Frontmatter key | Values | Default |
-|---|---|---|
-| `flashcards` | `true` | Not set |
-| `card_type` | `basic` \| `basic_reversed` | `basic` |
-| `card_front` | Any string | Filename (no extension) |
-
 Rules:
-- A deck folder can contain nested note folders.
-- A deck folder cannot contain another deck folder (no parent/child deck markers).
+
+- `requiredSections` must be a non-empty string array.
+- Every card note in this deck must include all required sections.
+- `instances` must be a non-empty array.
+- Each instance can be either `["PromptSection", "AnswerSection"]` or an object with `promptSection` and `answerSection` (optional `name`).
+- `promptSection` and `answerSection` must exist in `requiredSections`.
+
+## Card Notes
+
+Every markdown file under the deck directory is treated as a card note.
+
+Example note:
+
+```markdown
+# A
+Prompt content
+
+# B
+Answer content
+
+# C
+Extra context
+```
+
+## History Isolation
+
+For one note `X`, different instances maintain separate SM-2 records.
+
+- `A -> B` history is independent.
+- `B -> C` history is independent.
+
+## Nested Deck Rule
+
+Deck directories cannot be nested. If `parent/parent.flashcards` exists, then `parent/child/child.flashcards` is not allowed.
 
 ## Installation
 
-1. Copy `main.js`, `manifest.json`, and `styles.css` into your vault's `.obsidian/plugins/obsidian-flashcards/` folder.
-2. Enable the plugin in **Settings → Community Plugins**.
+1. Copy `main.js`, `manifest.json`, and `styles.css` into `.obsidian/plugins/obsidian-flashcards/`.
+2. Enable the plugin in Settings -> Community plugins.
 
 ## Usage
 
-1. Add frontmatter to at least one note in the folder you want as a deck (`flashcards: true`, `card_type`, or `card_front`).
-2. Click the 🧠 ribbon icon (or run the *Open Flashcard Deck* command) to start a study session.
-3. Press **Show Answer**, then rate your recall:
-   - **Again** — didn't remember; repeats in 1 day.
-   - **Hard** — remembered with difficulty.
-   - **Good** — correct with some effort.
-   - **Easy** — instant recall; longest interval.
+1. Create `<deck_dir>/<deck_dir>.flashcards`.
+2. Prepare card notes with all required H1 sections.
+3. Run Open Flashcard Deck (or click the ribbon icon).
+4. Choose a deck directory.
+5. Choose one configured deck mode.
+6. Review cards with Again/Hard/Good/Easy.
 
 ## Development
 
 ```bash
 npm install
-npm run build   # production bundle → main.js
-npm run dev     # watch mode
+npm run build
+npm run dev
 ```
