@@ -3,6 +3,7 @@ import {
 	ItemView,
 	MarkdownView,
 	MarkdownRenderer,
+	Modal,
 	Notice,
 	Plugin,
 	PluginSettingTab,
@@ -525,6 +526,110 @@ class SelectionModal<T> extends SuggestModal<T> {
 	}
 }
 
+interface BatchCreateWizardResult {
+	seedSection: string;
+	text: string;
+	delimiter: string;
+}
+
+class BatchCreateWizardModal extends Modal {
+	private readonly sections: string[];
+	private readonly onSubmit: (result: BatchCreateWizardResult) => void;
+	private seedSection: string;
+	private textValue = "";
+	private delimiterValue = "\\n";
+
+	constructor(
+		app: App,
+		sections: string[],
+		onSubmit: (result: BatchCreateWizardResult) => void,
+	) {
+		super(app);
+		this.sections = sections;
+		this.seedSection = sections[0] ?? "";
+		this.onSubmit = onSubmit;
+	}
+
+	onOpen(): void {
+		const { contentEl } = this;
+		contentEl.empty();
+
+		contentEl.createEl("h3", { text: "Batch Create Flashcards" });
+		contentEl.createEl("p", {
+			text: "Select input section, set delimiter, then paste text to create one flashcard per segment.",
+		});
+
+		contentEl.createEl("label", { text: "Input section" });
+		const sectionSelect = contentEl.createEl("select");
+		sectionSelect.style.width = "100%";
+		for (const section of this.sections) {
+			const option = sectionSelect.createEl("option", {
+				text: section,
+				value: section,
+			});
+			if (section === this.seedSection) {
+				option.selected = true;
+			}
+		}
+		sectionSelect.addEventListener("change", () => {
+			this.seedSection = sectionSelect.value;
+		});
+
+		contentEl.createEl("label", { text: "Delimiter" });
+		contentEl.createEl("p", {
+			text: "Default is \\n (one flashcard per line). You can also use custom text like --- or ;",
+			cls: "setting-item-description",
+		});
+		const delimiterInput = contentEl.createEl("input", {
+			type: "text",
+			placeholder: "\\n",
+		});
+		delimiterInput.value = this.delimiterValue;
+		delimiterInput.style.width = "100%";
+		delimiterInput.addEventListener("input", () => {
+			this.delimiterValue = delimiterInput.value;
+		});
+
+		contentEl.createEl("label", { text: "Input text" });
+		contentEl.createEl("p", {
+			text: "Paste your source text. It will be split by the delimiter and imported in batch.",
+			cls: "setting-item-description",
+		});
+		const textArea = contentEl.createEl("textarea", {
+			placeholder: "Line 1\\nLine 2\\nLine 3",
+		});
+		textArea.value = this.textValue;
+		textArea.rows = 10;
+		textArea.style.width = "100%";
+		textArea.addEventListener("input", () => {
+			this.textValue = textArea.value;
+		});
+
+		const footer = contentEl.createDiv({ cls: "flashcard-batch-create-actions" });
+		const cancelBtn = footer.createEl("button", {
+			cls: "mod-warning",
+			text: "Cancel",
+		});
+		cancelBtn.addEventListener("click", () => this.close());
+
+		const createBtn = footer.createEl("button", {
+			cls: "mod-cta",
+			text: "Create",
+		});
+		createBtn.addEventListener("click", () => {
+			if (!this.seedSection) {
+				return;
+			}
+			this.onSubmit({
+				seedSection: this.seedSection,
+				text: this.textValue,
+				delimiter: this.delimiterValue,
+			});
+			this.close();
+		});
+	}
+}
+
 export class FlashcardView extends ItemView {
 	private plugin: FlashcardsPlugin;
 	private queue: StudyCard[] = [];
@@ -813,6 +918,14 @@ export class FlashcardView extends ItemView {
 			createBtn.addEventListener("click", () =>
 				void this.createFlashcardInActiveDeck(),
 			);
+
+			const batchCreateBtn = wrap.createEl("button", {
+				cls: "flashcard-btn flashcard-btn-show",
+				text: "Batch Create",
+			});
+			batchCreateBtn.addEventListener("click", () =>
+				void this.batchCreateFlashcardsInActiveDeck(),
+			);
 		}
 
 		const btn = wrap.createEl("button", {
@@ -827,6 +940,11 @@ export class FlashcardView extends ItemView {
 	private async createFlashcardInActiveDeck(): Promise<void> {
 		if (!this.activeSelection) return;
 		await this.plugin.createFlashcardFromDeckFolder(this.activeSelection.deck.folder);
+	}
+
+	private async batchCreateFlashcardsInActiveDeck(): Promise<void> {
+		if (!this.activeSelection) return;
+		await this.plugin.batchCreateFlashcardsFromFolder(this.activeSelection.deck.folder);
 	}
 
 	private async openQueueErrorFile(): Promise<void> {
@@ -931,6 +1049,14 @@ export class FlashcardView extends ItemView {
 			});
 			newBtn.addEventListener("click", () =>
 				void this.createFlashcardInActiveDeck(),
+			);
+
+			const batchBtn = footer.createEl("button", {
+				cls: "flashcard-btn flashcard-btn-show",
+				text: "Batch Create",
+			});
+			batchBtn.addEventListener("click", () =>
+				void this.batchCreateFlashcardsInActiveDeck(),
 			);
 		}
 
@@ -1163,6 +1289,26 @@ export default class FlashcardsPlugin extends Plugin {
 	/** In-memory card records, kept in sync with data.json. */
 	cardData: Record<string, CardRecord> = {};
 	private aiStatusBarEl: HTMLElement | null = null;
+	private aiDeckCompletionInProgress = false;
+	private aiDeckCompletionCancelRequested = false;
+
+	private setAiStatusBarIdle(): void {
+		if (!this.aiStatusBarEl) return;
+		this.aiStatusBarEl.setText("AI Complete");
+	}
+
+	private setAiStatusBarCancelling(): void {
+		if (!this.aiStatusBarEl) return;
+		this.aiStatusBarEl.setText("AI Cancelling...");
+	}
+
+	private setAiStatusBarDeckProgress(processed: number, total: number): void {
+		if (!this.aiStatusBarEl) return;
+		const safeTotal = Math.max(1, total);
+		const safeProcessed = Math.max(0, Math.min(processed, safeTotal));
+		const percent = Math.round((safeProcessed / safeTotal) * 100);
+		this.aiStatusBarEl.setText(`AI ${safeProcessed}/${safeTotal} (${percent}%)`);
+	}
 
 	private logDebug(message: string, meta?: unknown): void {
 		if (typeof meta === "undefined") {
@@ -1206,8 +1352,16 @@ export default class FlashcardsPlugin extends Plugin {
 	private registerAiCompletionUi(): void {
 		this.aiStatusBarEl = this.addStatusBarItem();
 		this.aiStatusBarEl.addClass("mod-clickable");
-		this.aiStatusBarEl.setText("AI Complete");
-		this.aiStatusBarEl.addEventListener("click", () => void this.completeCurrentDeckWithAi());
+		this.setAiStatusBarIdle();
+		this.aiStatusBarEl.addEventListener("click", () => {
+			if (this.aiDeckCompletionInProgress) {
+				this.aiDeckCompletionCancelRequested = true;
+				this.setAiStatusBarCancelling();
+				new Notice("Cancelling AI deck completion after current request...");
+				return;
+			}
+			void this.completeCurrentDeckWithAi();
+		});
 
 		this.addCommand({
 			id: "ai-complete-current-flashcard",
@@ -1247,6 +1401,10 @@ export default class FlashcardsPlugin extends Plugin {
 
 	private updateAiStatusBarVisibility(): void {
 		if (!this.aiStatusBarEl) return;
+		if (this.aiDeckCompletionInProgress) {
+			this.aiStatusBarEl.style.display = "";
+			return;
+		}
 		const activeFile = this.app.workspace.getActiveFile();
 		const visible = activeFile instanceof TFile && activeFile.extension === "md" && !this.isDeckConfigFile(activeFile);
 		this.aiStatusBarEl.style.display = visible ? "" : "none";
@@ -1280,6 +1438,19 @@ export default class FlashcardsPlugin extends Plugin {
 						configFile: configFile?.path ?? null,
 					});
 					void this.createFlashcardFromDeckFolder(file);
+				}),
+		);
+
+		menuAny.addItem((item: any) =>
+			item
+				.setTitle("Batch Create Flashcards")
+				.setIcon("list-plus")
+				.onClick(() => {
+					this.logDebug("Batch Create Flashcards clicked", {
+						folder: file.path,
+						configFile: configFile?.path ?? null,
+					});
+					void this.batchCreateFlashcardsFromFolder(file);
 				}),
 		);
 	}
@@ -1329,6 +1500,12 @@ export default class FlashcardsPlugin extends Plugin {
 			id: "open-flashcard-deck",
 			name: "Open Flashcard Deck",
 			callback: () => void this.openStudyView(),
+		});
+
+		this.addCommand({
+			id: "batch-create-flashcards",
+			name: "Batch Create Flashcards",
+			callback: () => void this.batchCreateFlashcards(),
 		});
 
 		this.logDebug("plugin loaded", { version: this.manifest.version });
@@ -1509,9 +1686,6 @@ export default class FlashcardsPlugin extends Plugin {
 			}
 		| { error: string } {
 		if (!deck.config.ai) {
-			this.logDebug("AI completion skipped: deck has no ai config", {
-				deckPath: deck.folder.path,
-			});
 			return { error: `Deck ${deck.folder.path} has no ai configuration.` };
 		}
 
@@ -1527,18 +1701,11 @@ export default class FlashcardsPlugin extends Plugin {
 		}
 
 		if (!sourceSection) {
-			this.logDebug("AI completion skipped: no source section content", {
-				deckPath: deck.folder.path,
-			});
 			return { error: "No source section has content yet. Fill the first source section before using AI Complete." };
 		}
 
 		const targetPrompts = deck.config.ai.prompts[sourceSection];
 		if (!targetPrompts) {
-			this.logDebug("AI completion skipped: no source->target mapping", {
-				deckPath: deck.folder.path,
-				sourceSection,
-			});
 			return {
 				error: `No AI prompt mapping is configured from section \"${sourceSection}\".`,
 			};
@@ -1574,53 +1741,89 @@ export default class FlashcardsPlugin extends Plugin {
 		});
 	}
 
-	private async completeSingleFlashcardWithAi(
+	private async prepareAiCompletionTask(
 		file: TFile,
 		deck: DeckDefinition,
-	): Promise<"filled" | "skipped" | "failed"> {
-		this.logDebug("AI single start", {
-			filePath: file.path,
-			deckPath: deck.folder.path,
-		});
-
+	): Promise<
+		| {
+				file: TFile;
+				raw: string;
+				plan: {
+					sourceSection: string;
+					sourceContent: string;
+					targetSection: string;
+					instruction: string;
+					aI: DeckAiConfig;
+				};
+		  }
+		| null
+	> {
 		const raw = await this.app.vault.read(file);
 		const sections = parseTopLevelSections(raw);
 		const plan = this.findAiCompletionPlan(deck, sections);
-
 		if ("error" in plan) {
-			this.logDebug("AI single skipped", {
-				filePath: file.path,
-				reason: plan.error,
-			});
-			return "skipped";
+			return null;
 		}
 
-		this.logAiPlan(file.path, plan.sourceSection, plan.targetSection);
+		return {
+			file,
+			raw,
+			plan,
+		};
+	}
 
-		const prompt = buildPromptFromSource(plan.sourceContent, plan.instruction);
+	private async executeAiCompletionTask(task: {
+		file: TFile;
+		raw: string;
+		plan: {
+			sourceSection: string;
+			sourceContent: string;
+			targetSection: string;
+			instruction: string;
+			aI: DeckAiConfig;
+		};
+	}): Promise<"filled" | "failed"> {
+		this.logDebug("AI single start", {
+			filePath: task.file.path,
+			deckPath: task.file.parent?.path ?? "",
+		});
+
+		this.logAiPlan(task.file.path, task.plan.sourceSection, task.plan.targetSection);
+		const prompt = buildPromptFromSource(task.plan.sourceContent, task.plan.instruction);
 
 		try {
-			const output = await this.generateAiOutput(plan.aI, prompt);
-			const updated = replaceTopLevelSectionContent(raw, plan.targetSection, output);
+			const output = await this.generateAiOutput(task.plan.aI, prompt);
+			const updated = replaceTopLevelSectionContent(task.raw, task.plan.targetSection, output);
 			if (!updated.updated) {
 				this.logDebug("AI single failed: target section not found", {
-					filePath: file.path,
-					targetSection: plan.targetSection,
+					filePath: task.file.path,
+					targetSection: task.plan.targetSection,
 				});
 				return "failed";
 			}
 
-			await this.app.vault.modify(file, updated.updatedMarkdown);
+			await this.app.vault.modify(task.file, updated.updatedMarkdown);
 			this.logDebug("AI single filled", {
-				filePath: file.path,
-				targetSection: plan.targetSection,
+				filePath: task.file.path,
+				targetSection: task.plan.targetSection,
 				outputLength: output.length,
 			});
 			return "filled";
 		} catch (error) {
-			console.error(`${DEBUG_PREFIX} AI completion failed`, { file: file.path, error });
+			console.error(`${DEBUG_PREFIX} AI completion failed`, { file: task.file.path, error });
 			return "failed";
 		}
+	}
+
+	private async completeSingleFlashcardWithAi(
+		file: TFile,
+		deck: DeckDefinition,
+	): Promise<"filled" | "skipped" | "failed"> {
+		const task = await this.prepareAiCompletionTask(file, deck);
+		if (!task) {
+			return "skipped";
+		}
+		return this.executeAiCompletionTask(task);
 	}
 
 	async completeCurrentFlashcardWithAi(): Promise<void> {
@@ -1653,6 +1856,13 @@ export default class FlashcardsPlugin extends Plugin {
 	}
 
 	async completeCurrentDeckWithAi(): Promise<void> {
+		if (this.aiDeckCompletionInProgress) {
+			this.aiDeckCompletionCancelRequested = true;
+			this.setAiStatusBarCancelling();
+			new Notice("Cancelling AI deck completion after current request...");
+			return;
+		}
+
 		const active = this.app.workspace.getActiveFile();
 		if (!(active instanceof TFile) || active.extension !== "md") {
 			new Notice("Open a flashcard note inside the deck first.");
@@ -1676,31 +1886,90 @@ export default class FlashcardsPlugin extends Plugin {
 			return;
 		}
 
-		new Notice(`AI completing deck: ${deckResult.deck.folder.path} (${files.length} notes)...`);
-
-		let filled = 0;
-		let skipped = 0;
-		let failed = 0;
+		const tasks: Array<
+			{
+				file: TFile;
+				raw: string;
+				plan: {
+					sourceSection: string;
+					sourceContent: string;
+					targetSection: string;
+					instruction: string;
+					aI: DeckAiConfig;
+				};
+			}
+		> = [];
 
 		for (const file of files) {
-			const status = await this.completeSingleFlashcardWithAi(file, deckResult.deck);
-			if (status === "filled") filled++;
-			else if (status === "skipped") skipped++;
-			else failed++;
+			const task = await this.prepareAiCompletionTask(file, deckResult.deck);
+			if (task) {
+				tasks.push(task);
+			}
 		}
 
-		this.logDebug("AI deck command done", {
-			deckPath: deckResult.deck.folder.path,
-			total: files.length,
-			filled,
-			skipped,
-			failed,
-		});
+		if (tasks.length === 0) {
+			new Notice("No eligible flashcards need AI completion in this deck.");
+			return;
+		}
 
-		new Notice(
-			`AI deck completion done: filled ${filled}, skipped ${skipped}, failed ${failed}.`,
-			8000,
-		);
+		this.aiDeckCompletionInProgress = true;
+		this.aiDeckCompletionCancelRequested = false;
+		this.setAiStatusBarDeckProgress(0, tasks.length);
+		this.updateAiStatusBarVisibility();
+
+		try {
+			new Notice(`AI completing deck: ${deckResult.deck.folder.path} (${tasks.length} eligible notes)...`);
+
+			let filled = 0;
+			let failed = 0;
+			let processed = 0;
+			let cancelled = false;
+
+			for (let index = 0; index < tasks.length; index++) {
+				if (this.aiDeckCompletionCancelRequested) {
+					cancelled = true;
+					break;
+				}
+
+				const status = await this.executeAiCompletionTask(tasks[index]);
+				if (status === "filled") filled++;
+				else failed++;
+				processed++;
+
+				this.setAiStatusBarDeckProgress(processed, tasks.length);
+
+				if (this.aiDeckCompletionCancelRequested) {
+					cancelled = true;
+					break;
+				}
+			}
+
+			this.logDebug("AI deck command done", {
+				deckPath: deckResult.deck.folder.path,
+				totalEligible: tasks.length,
+				processed,
+				filled,
+				failed,
+				cancelled,
+			});
+
+			if (cancelled) {
+				new Notice(
+					`AI deck completion cancelled: processed ${processed}/${tasks.length}, filled ${filled}, failed ${failed}.`,
+					8000,
+				);
+			} else {
+				new Notice(
+					`AI deck completion done: processed ${processed}, filled ${filled}, failed ${failed}.`,
+					8000,
+				);
+			}
+		} finally {
+			this.aiDeckCompletionInProgress = false;
+			this.aiDeckCompletionCancelRequested = false;
+			this.setAiStatusBarIdle();
+			this.updateAiStatusBarVisibility();
+		}
 	}
 
 	getDeckFontSizePx(deckPath: string | null | undefined): number {
@@ -1792,6 +2061,185 @@ export default class FlashcardsPlugin extends Plugin {
 
 	private createFlashcardTemplate(requiredSections: string[]): string {
 		return requiredSections.map((section) => `# ${section}\n`).join("\n");
+	}
+
+	private createFlashcardTemplateWithSeedContent(
+		requiredSections: string[],
+		seedSection: string,
+		seedContent: string,
+	): string {
+		const normalizedSeed = seedContent.trim();
+		return requiredSections
+			.map((section) => {
+				if (section !== seedSection) {
+					return `# ${section}\n`;
+				}
+				if (!normalizedSeed) {
+					return `# ${section}\n`;
+				}
+				return `# ${section}\n${normalizedSeed}\n`;
+			})
+			.join("\n");
+	}
+
+	private normalizeBatchDelimiter(raw: string): string {
+		const trimmed = raw.trim();
+		if (!trimmed) return "\n";
+		return trimmed
+			.replace(/\\r/g, "\r")
+			.replace(/\\n/g, "\n")
+			.replace(/\\t/g, "\t");
+	}
+
+	private splitBatchSeedText(rawText: string, delimiterRaw: string): string[] {
+		const delimiter = this.normalizeBatchDelimiter(delimiterRaw);
+		const chunks = delimiter === "\n" ? rawText.split(/\r?\n/g) : rawText.split(delimiter);
+		return chunks
+			.map((chunk) => chunk.trim())
+			.filter((chunk) => chunk.length > 0);
+	}
+
+	private async promptBatchCreateWizardInput(
+		requiredSections: string[],
+	): Promise<BatchCreateWizardResult | null> {
+		return await new Promise<BatchCreateWizardResult | null>((resolve) => {
+			let settled = false;
+			const modal = new BatchCreateWizardModal(this.app, requiredSections, (result) => {
+				settled = true;
+				this.logDebug("Batch create wizard submitted", {
+					seedSection: result.seedSection,
+					textLength: result.text.length,
+					delimiter: result.delimiter,
+				});
+				resolve(result);
+			});
+
+			const close = modal.onClose.bind(modal);
+			modal.onClose = () => {
+				close();
+				if (!settled) {
+					this.logDebug("Batch create wizard modal closed without submit", {
+						requiredSections,
+					});
+					resolve(null);
+				}
+			};
+
+			// Delay open by one tick to avoid being closed by context-menu lifecycle in some Obsidian builds.
+			window.setTimeout(() => modal.open(), 0);
+		});
+	}
+
+	private async batchCreateFlashcardsFromDeck(
+		deck: DeckDefinition,
+		seedSection: string,
+		seedChunks: string[],
+	): Promise<{ created: number; failed: number; firstCreatedPath: string }> {
+		let created = 0;
+		let failed = 0;
+		let firstCreatedPath = "";
+
+		for (const chunk of seedChunks) {
+			const notePath = this.getUniqueNewFlashcardPath(deck.folder);
+			const content = this.createFlashcardTemplateWithSeedContent(
+				deck.config.requiredSections,
+				seedSection,
+				chunk,
+			);
+
+			try {
+				const createdFile = await this.app.vault.create(notePath, content);
+				created++;
+				if (!firstCreatedPath) {
+					firstCreatedPath = createdFile.path;
+				}
+			} catch (error) {
+				failed++;
+				console.error(`${DEBUG_PREFIX} batch create failed`, {
+					notePath,
+					error,
+				});
+			}
+		}
+
+		return { created, failed, firstCreatedPath };
+	}
+
+	private async runBatchCreateWizard(
+		deck: DeckDefinition,
+	): Promise<void> {
+		this.logDebug("Batch create wizard start", {
+			deckPath: deck.folder.path,
+			requiredSections: deck.config.requiredSections,
+		});
+
+		const input = await this.promptBatchCreateWizardInput(deck.config.requiredSections);
+		if (!input) {
+			new Notice("Batch creation cancelled.");
+			return;
+		}
+
+		const chunks = this.splitBatchSeedText(input.text, input.delimiter);
+		if (chunks.length === 0) {
+			new Notice("No valid input found. Please provide text that can be split into entries.");
+			return;
+		}
+
+		new Notice(`Creating ${chunks.length} flashcard(s) in ${deck.folder.path}...`);
+
+		const result = await this.batchCreateFlashcardsFromDeck(deck, input.seedSection, chunks);
+
+		if (result.firstCreatedPath) {
+			const firstFile = this.app.vault.getAbstractFileByPath(result.firstCreatedPath);
+			if (firstFile instanceof TFile) {
+				const leaf = this.app.workspace.getLeaf("tab");
+				await leaf.openFile(firstFile);
+			}
+		}
+
+		new Notice(
+			`Batch create done: created ${result.created}, failed ${result.failed}.`,
+			8000,
+		);
+	}
+
+	async batchCreateFlashcardsFromFolder(folder: TFolder): Promise<void> {
+		const deckResult = await this.getDeckDefinitionForFolder(folder);
+		if (!deckResult.deck) {
+			new Notice(deckResult.error);
+			return;
+		}
+
+		this.logDebug("Batch create command (folder)", {
+			deckPath: folder.path,
+		});
+
+		await this.runBatchCreateWizard(deckResult.deck);
+	}
+
+	async batchCreateFlashcards(): Promise<void> {
+		const discovered = await this.discoverDeckDefinitions();
+		if (discovered.error) {
+			new Notice(discovered.error);
+			return;
+		}
+
+		const deck = await this.pickOne(
+			discovered.decks,
+			"Select deck for batch create",
+			(item) => item.folder.path,
+			(item) => item.configFile.name,
+		);
+		if (!deck) {
+			new Notice("Batch creation cancelled.");
+			return;
+		}
+
+		this.logDebug("Batch create command", {
+			deckPath: deck.folder.path,
+		});
+
+		await this.runBatchCreateWizard(deck);
 	}
 
 	private collectDeckMarkdownFiles(folder: TFolder): TFile[] {

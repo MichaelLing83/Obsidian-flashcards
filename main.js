@@ -333,6 +333,89 @@ var SelectionModal = class extends import_obsidian.SuggestModal {
     this.onChoose(item);
   }
 };
+var BatchCreateWizardModal = class extends import_obsidian.Modal {
+  constructor(app, sections, onSubmit) {
+    var _a;
+    super(app);
+    this.textValue = "";
+    this.delimiterValue = "\\n";
+    this.sections = sections;
+    this.seedSection = (_a = sections[0]) != null ? _a : "";
+    this.onSubmit = onSubmit;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: "Batch Create Flashcards" });
+    contentEl.createEl("p", {
+      text: "Select input section, set delimiter, then paste text to create one flashcard per segment."
+    });
+    contentEl.createEl("label", { text: "Input section" });
+    const sectionSelect = contentEl.createEl("select");
+    sectionSelect.style.width = "100%";
+    for (const section of this.sections) {
+      const option = sectionSelect.createEl("option", {
+        text: section,
+        value: section
+      });
+      if (section === this.seedSection) {
+        option.selected = true;
+      }
+    }
+    sectionSelect.addEventListener("change", () => {
+      this.seedSection = sectionSelect.value;
+    });
+    contentEl.createEl("label", { text: "Delimiter" });
+    contentEl.createEl("p", {
+      text: "Default is \\n (one flashcard per line). You can also use custom text like --- or ;",
+      cls: "setting-item-description"
+    });
+    const delimiterInput = contentEl.createEl("input", {
+      type: "text",
+      placeholder: "\\n"
+    });
+    delimiterInput.value = this.delimiterValue;
+    delimiterInput.style.width = "100%";
+    delimiterInput.addEventListener("input", () => {
+      this.delimiterValue = delimiterInput.value;
+    });
+    contentEl.createEl("label", { text: "Input text" });
+    contentEl.createEl("p", {
+      text: "Paste your source text. It will be split by the delimiter and imported in batch.",
+      cls: "setting-item-description"
+    });
+    const textArea = contentEl.createEl("textarea", {
+      placeholder: "Line 1\\nLine 2\\nLine 3"
+    });
+    textArea.value = this.textValue;
+    textArea.rows = 10;
+    textArea.style.width = "100%";
+    textArea.addEventListener("input", () => {
+      this.textValue = textArea.value;
+    });
+    const footer = contentEl.createDiv({ cls: "flashcard-batch-create-actions" });
+    const cancelBtn = footer.createEl("button", {
+      cls: "mod-warning",
+      text: "Cancel"
+    });
+    cancelBtn.addEventListener("click", () => this.close());
+    const createBtn = footer.createEl("button", {
+      cls: "mod-cta",
+      text: "Create"
+    });
+    createBtn.addEventListener("click", () => {
+      if (!this.seedSection) {
+        return;
+      }
+      this.onSubmit({
+        seedSection: this.seedSection,
+        text: this.textValue,
+        delimiter: this.delimiterValue
+      });
+      this.close();
+    });
+  }
+};
 var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
@@ -563,6 +646,14 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
         "click",
         () => void this.createFlashcardInActiveDeck()
       );
+      const batchCreateBtn = wrap.createEl("button", {
+        cls: "flashcard-btn flashcard-btn-show",
+        text: "Batch Create"
+      });
+      batchCreateBtn.addEventListener(
+        "click",
+        () => void this.batchCreateFlashcardsInActiveDeck()
+      );
     }
     const btn = wrap.createEl("button", {
       cls: "flashcard-btn flashcard-btn-primary",
@@ -574,6 +665,10 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
   async createFlashcardInActiveDeck() {
     if (!this.activeSelection) return;
     await this.plugin.createFlashcardFromDeckFolder(this.activeSelection.deck.folder);
+  }
+  async batchCreateFlashcardsInActiveDeck() {
+    if (!this.activeSelection) return;
+    await this.plugin.batchCreateFlashcardsFromFolder(this.activeSelection.deck.folder);
   }
   async openQueueErrorFile() {
     if (!this.queueBuildErrorFilePath) return;
@@ -658,6 +753,14 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
       newBtn.addEventListener(
         "click",
         () => void this.createFlashcardInActiveDeck()
+      );
+      const batchBtn = footer.createEl("button", {
+        cls: "flashcard-btn flashcard-btn-show",
+        text: "Batch Create"
+      });
+      batchBtn.addEventListener(
+        "click",
+        () => void this.batchCreateFlashcardsInActiveDeck()
       );
     }
     if (!this.revealed) {
@@ -830,6 +933,23 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
     /** In-memory card records, kept in sync with data.json. */
     this.cardData = {};
     this.aiStatusBarEl = null;
+    this.aiDeckCompletionInProgress = false;
+    this.aiDeckCompletionCancelRequested = false;
+  }
+  setAiStatusBarIdle() {
+    if (!this.aiStatusBarEl) return;
+    this.aiStatusBarEl.setText("AI Complete");
+  }
+  setAiStatusBarCancelling() {
+    if (!this.aiStatusBarEl) return;
+    this.aiStatusBarEl.setText("AI Cancelling...");
+  }
+  setAiStatusBarDeckProgress(processed, total) {
+    if (!this.aiStatusBarEl) return;
+    const safeTotal = Math.max(1, total);
+    const safeProcessed = Math.max(0, Math.min(processed, safeTotal));
+    const percent = Math.round(safeProcessed / safeTotal * 100);
+    this.aiStatusBarEl.setText(`AI ${safeProcessed}/${safeTotal} (${percent}%)`);
   }
   logDebug(message, meta) {
     if (typeof meta === "undefined") {
@@ -867,8 +987,16 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
   registerAiCompletionUi() {
     this.aiStatusBarEl = this.addStatusBarItem();
     this.aiStatusBarEl.addClass("mod-clickable");
-    this.aiStatusBarEl.setText("AI Complete");
-    this.aiStatusBarEl.addEventListener("click", () => void this.completeCurrentDeckWithAi());
+    this.setAiStatusBarIdle();
+    this.aiStatusBarEl.addEventListener("click", () => {
+      if (this.aiDeckCompletionInProgress) {
+        this.aiDeckCompletionCancelRequested = true;
+        this.setAiStatusBarCancelling();
+        new import_obsidian.Notice("Cancelling AI deck completion after current request...");
+        return;
+      }
+      void this.completeCurrentDeckWithAi();
+    });
     this.addCommand({
       id: "ai-complete-current-flashcard",
       name: "AI Complete Current Flashcard",
@@ -903,6 +1031,10 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
   }
   updateAiStatusBarVisibility() {
     if (!this.aiStatusBarEl) return;
+    if (this.aiDeckCompletionInProgress) {
+      this.aiStatusBarEl.style.display = "";
+      return;
+    }
     const activeFile = this.app.workspace.getActiveFile();
     const visible = activeFile instanceof import_obsidian.TFile && activeFile.extension === "md" && !this.isDeckConfigFile(activeFile);
     this.aiStatusBarEl.style.display = visible ? "" : "none";
@@ -927,6 +1059,16 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
           configFile: (_a2 = configFile == null ? void 0 : configFile.path) != null ? _a2 : null
         });
         void this.createFlashcardFromDeckFolder(file);
+      })
+    );
+    menuAny.addItem(
+      (item) => item.setTitle("Batch Create Flashcards").setIcon("list-plus").onClick(() => {
+        var _a2;
+        this.logDebug("Batch Create Flashcards clicked", {
+          folder: file.path,
+          configFile: (_a2 = configFile == null ? void 0 : configFile.path) != null ? _a2 : null
+        });
+        void this.batchCreateFlashcardsFromFolder(file);
       })
     );
   }
@@ -961,6 +1103,11 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
       id: "open-flashcard-deck",
       name: "Open Flashcard Deck",
       callback: () => void this.openStudyView()
+    });
+    this.addCommand({
+      id: "batch-create-flashcards",
+      name: "Batch Create Flashcards",
+      callback: () => void this.batchCreateFlashcards()
     });
     this.logDebug("plugin loaded", { version: this.manifest.version });
     this.registerDeckFolderMenuHook();
@@ -1096,9 +1243,6 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
   findAiCompletionPlan(deck, sections) {
     var _a, _b, _c, _d, _e;
     if (!deck.config.ai) {
-      this.logDebug("AI completion skipped: deck has no ai config", {
-        deckPath: deck.folder.path
-      });
       return { error: `Deck ${deck.folder.path} has no ai configuration.` };
     }
     let sourceSection = "";
@@ -1112,17 +1256,10 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
       }
     }
     if (!sourceSection) {
-      this.logDebug("AI completion skipped: no source section content", {
-        deckPath: deck.folder.path
-      });
       return { error: "No source section has content yet. Fill the first source section before using AI Complete." };
     }
     const targetPrompts = deck.config.ai.prompts[sourceSection];
     if (!targetPrompts) {
-      this.logDebug("AI completion skipped: no source->target mapping", {
-        deckPath: deck.folder.path,
-        sourceSection
-      });
       return {
         error: `No AI prompt mapping is configured from section "${sourceSection}".`
       };
@@ -1153,44 +1290,55 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
       targetSection
     });
   }
-  async completeSingleFlashcardWithAi(file, deck) {
-    this.logDebug("AI single start", {
-      filePath: file.path,
-      deckPath: deck.folder.path
-    });
+  async prepareAiCompletionTask(file, deck) {
     const raw = await this.app.vault.read(file);
     const sections = parseTopLevelSections(raw);
     const plan = this.findAiCompletionPlan(deck, sections);
     if ("error" in plan) {
-      this.logDebug("AI single skipped", {
-        filePath: file.path,
-        reason: plan.error
-      });
-      return "skipped";
+      return null;
     }
-    this.logAiPlan(file.path, plan.sourceSection, plan.targetSection);
-    const prompt = buildPromptFromSource(plan.sourceContent, plan.instruction);
+    return {
+      file,
+      raw,
+      plan
+    };
+  }
+  async executeAiCompletionTask(task) {
+    var _a, _b;
+    this.logDebug("AI single start", {
+      filePath: task.file.path,
+      deckPath: (_b = (_a = task.file.parent) == null ? void 0 : _a.path) != null ? _b : ""
+    });
+    this.logAiPlan(task.file.path, task.plan.sourceSection, task.plan.targetSection);
+    const prompt = buildPromptFromSource(task.plan.sourceContent, task.plan.instruction);
     try {
-      const output = await this.generateAiOutput(plan.aI, prompt);
-      const updated = replaceTopLevelSectionContent(raw, plan.targetSection, output);
+      const output = await this.generateAiOutput(task.plan.aI, prompt);
+      const updated = replaceTopLevelSectionContent(task.raw, task.plan.targetSection, output);
       if (!updated.updated) {
         this.logDebug("AI single failed: target section not found", {
-          filePath: file.path,
-          targetSection: plan.targetSection
+          filePath: task.file.path,
+          targetSection: task.plan.targetSection
         });
         return "failed";
       }
-      await this.app.vault.modify(file, updated.updatedMarkdown);
+      await this.app.vault.modify(task.file, updated.updatedMarkdown);
       this.logDebug("AI single filled", {
-        filePath: file.path,
-        targetSection: plan.targetSection,
+        filePath: task.file.path,
+        targetSection: task.plan.targetSection,
         outputLength: output.length
       });
       return "filled";
     } catch (error) {
-      console.error(`${DEBUG_PREFIX} AI completion failed`, { file: file.path, error });
+      console.error(`${DEBUG_PREFIX} AI completion failed`, { file: task.file.path, error });
       return "failed";
     }
+  }
+  async completeSingleFlashcardWithAi(file, deck) {
+    const task = await this.prepareAiCompletionTask(file, deck);
+    if (!task) {
+      return "skipped";
+    }
+    return this.executeAiCompletionTask(task);
   }
   async completeCurrentFlashcardWithAi() {
     const file = this.app.workspace.getActiveFile();
@@ -1218,6 +1366,12 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
     }
   }
   async completeCurrentDeckWithAi() {
+    if (this.aiDeckCompletionInProgress) {
+      this.aiDeckCompletionCancelRequested = true;
+      this.setAiStatusBarCancelling();
+      new import_obsidian.Notice("Cancelling AI deck completion after current request...");
+      return;
+    }
     const active = this.app.workspace.getActiveFile();
     if (!(active instanceof import_obsidian.TFile) || active.extension !== "md") {
       new import_obsidian.Notice("Open a flashcard note inside the deck first.");
@@ -1237,27 +1391,67 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
       new import_obsidian.Notice("No flashcard notes found in this deck.");
       return;
     }
-    new import_obsidian.Notice(`AI completing deck: ${deckResult.deck.folder.path} (${files.length} notes)...`);
-    let filled = 0;
-    let skipped = 0;
-    let failed = 0;
+    const tasks = [];
     for (const file of files) {
-      const status = await this.completeSingleFlashcardWithAi(file, deckResult.deck);
-      if (status === "filled") filled++;
-      else if (status === "skipped") skipped++;
-      else failed++;
+      const task = await this.prepareAiCompletionTask(file, deckResult.deck);
+      if (task) {
+        tasks.push(task);
+      }
     }
-    this.logDebug("AI deck command done", {
-      deckPath: deckResult.deck.folder.path,
-      total: files.length,
-      filled,
-      skipped,
-      failed
-    });
-    new import_obsidian.Notice(
-      `AI deck completion done: filled ${filled}, skipped ${skipped}, failed ${failed}.`,
-      8e3
-    );
+    if (tasks.length === 0) {
+      new import_obsidian.Notice("No eligible flashcards need AI completion in this deck.");
+      return;
+    }
+    this.aiDeckCompletionInProgress = true;
+    this.aiDeckCompletionCancelRequested = false;
+    this.setAiStatusBarDeckProgress(0, tasks.length);
+    this.updateAiStatusBarVisibility();
+    try {
+      new import_obsidian.Notice(`AI completing deck: ${deckResult.deck.folder.path} (${tasks.length} eligible notes)...`);
+      let filled = 0;
+      let failed = 0;
+      let processed = 0;
+      let cancelled = false;
+      for (let index = 0; index < tasks.length; index++) {
+        if (this.aiDeckCompletionCancelRequested) {
+          cancelled = true;
+          break;
+        }
+        const status = await this.executeAiCompletionTask(tasks[index]);
+        if (status === "filled") filled++;
+        else failed++;
+        processed++;
+        this.setAiStatusBarDeckProgress(processed, tasks.length);
+        if (this.aiDeckCompletionCancelRequested) {
+          cancelled = true;
+          break;
+        }
+      }
+      this.logDebug("AI deck command done", {
+        deckPath: deckResult.deck.folder.path,
+        totalEligible: tasks.length,
+        processed,
+        filled,
+        failed,
+        cancelled
+      });
+      if (cancelled) {
+        new import_obsidian.Notice(
+          `AI deck completion cancelled: processed ${processed}/${tasks.length}, filled ${filled}, failed ${failed}.`,
+          8e3
+        );
+      } else {
+        new import_obsidian.Notice(
+          `AI deck completion done: processed ${processed}, filled ${filled}, failed ${failed}.`,
+          8e3
+        );
+      }
+    } finally {
+      this.aiDeckCompletionInProgress = false;
+      this.aiDeckCompletionCancelRequested = false;
+      this.setAiStatusBarIdle();
+      this.updateAiStatusBarVisibility();
+    }
   }
   getDeckFontSizePx(deckPath) {
     var _a;
@@ -1333,6 +1527,145 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
   createFlashcardTemplate(requiredSections) {
     return requiredSections.map((section) => `# ${section}
 `).join("\n");
+  }
+  createFlashcardTemplateWithSeedContent(requiredSections, seedSection, seedContent) {
+    const normalizedSeed = seedContent.trim();
+    return requiredSections.map((section) => {
+      if (section !== seedSection) {
+        return `# ${section}
+`;
+      }
+      if (!normalizedSeed) {
+        return `# ${section}
+`;
+      }
+      return `# ${section}
+${normalizedSeed}
+`;
+    }).join("\n");
+  }
+  normalizeBatchDelimiter(raw) {
+    const trimmed = raw.trim();
+    if (!trimmed) return "\n";
+    return trimmed.replace(/\\r/g, "\r").replace(/\\n/g, "\n").replace(/\\t/g, "	");
+  }
+  splitBatchSeedText(rawText, delimiterRaw) {
+    const delimiter = this.normalizeBatchDelimiter(delimiterRaw);
+    const chunks = delimiter === "\n" ? rawText.split(/\r?\n/g) : rawText.split(delimiter);
+    return chunks.map((chunk) => chunk.trim()).filter((chunk) => chunk.length > 0);
+  }
+  async promptBatchCreateWizardInput(requiredSections) {
+    return await new Promise((resolve) => {
+      let settled = false;
+      const modal = new BatchCreateWizardModal(this.app, requiredSections, (result) => {
+        settled = true;
+        this.logDebug("Batch create wizard submitted", {
+          seedSection: result.seedSection,
+          textLength: result.text.length,
+          delimiter: result.delimiter
+        });
+        resolve(result);
+      });
+      const close = modal.onClose.bind(modal);
+      modal.onClose = () => {
+        close();
+        if (!settled) {
+          this.logDebug("Batch create wizard modal closed without submit", {
+            requiredSections
+          });
+          resolve(null);
+        }
+      };
+      window.setTimeout(() => modal.open(), 0);
+    });
+  }
+  async batchCreateFlashcardsFromDeck(deck, seedSection, seedChunks) {
+    let created = 0;
+    let failed = 0;
+    let firstCreatedPath = "";
+    for (const chunk of seedChunks) {
+      const notePath = this.getUniqueNewFlashcardPath(deck.folder);
+      const content = this.createFlashcardTemplateWithSeedContent(
+        deck.config.requiredSections,
+        seedSection,
+        chunk
+      );
+      try {
+        const createdFile = await this.app.vault.create(notePath, content);
+        created++;
+        if (!firstCreatedPath) {
+          firstCreatedPath = createdFile.path;
+        }
+      } catch (error) {
+        failed++;
+        console.error(`${DEBUG_PREFIX} batch create failed`, {
+          notePath,
+          error
+        });
+      }
+    }
+    return { created, failed, firstCreatedPath };
+  }
+  async runBatchCreateWizard(deck) {
+    this.logDebug("Batch create wizard start", {
+      deckPath: deck.folder.path,
+      requiredSections: deck.config.requiredSections
+    });
+    const input = await this.promptBatchCreateWizardInput(deck.config.requiredSections);
+    if (!input) {
+      new import_obsidian.Notice("Batch creation cancelled.");
+      return;
+    }
+    const chunks = this.splitBatchSeedText(input.text, input.delimiter);
+    if (chunks.length === 0) {
+      new import_obsidian.Notice("No valid input found. Please provide text that can be split into entries.");
+      return;
+    }
+    new import_obsidian.Notice(`Creating ${chunks.length} flashcard(s) in ${deck.folder.path}...`);
+    const result = await this.batchCreateFlashcardsFromDeck(deck, input.seedSection, chunks);
+    if (result.firstCreatedPath) {
+      const firstFile = this.app.vault.getAbstractFileByPath(result.firstCreatedPath);
+      if (firstFile instanceof import_obsidian.TFile) {
+        const leaf = this.app.workspace.getLeaf("tab");
+        await leaf.openFile(firstFile);
+      }
+    }
+    new import_obsidian.Notice(
+      `Batch create done: created ${result.created}, failed ${result.failed}.`,
+      8e3
+    );
+  }
+  async batchCreateFlashcardsFromFolder(folder) {
+    const deckResult = await this.getDeckDefinitionForFolder(folder);
+    if (!deckResult.deck) {
+      new import_obsidian.Notice(deckResult.error);
+      return;
+    }
+    this.logDebug("Batch create command (folder)", {
+      deckPath: folder.path
+    });
+    await this.runBatchCreateWizard(deckResult.deck);
+  }
+  async batchCreateFlashcards() {
+    const discovered = await this.discoverDeckDefinitions();
+    if (discovered.error) {
+      new import_obsidian.Notice(discovered.error);
+      return;
+    }
+    const deck = await this.pickOne(
+      discovered.decks,
+      "Select deck for batch create",
+      (item) => item.folder.path,
+      (item) => item.configFile.name
+    );
+    if (!deck) {
+      new import_obsidian.Notice("Batch creation cancelled.");
+      return;
+    }
+    this.logDebug("Batch create command", {
+      deckPath: deck.folder.path
+    });
+    await this.runBatchCreateWizard(deck);
   }
   collectDeckMarkdownFiles(folder) {
     const files = [];

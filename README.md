@@ -10,7 +10,8 @@ An Obsidian plugin for spaced repetition (SM-2) with deck schemas driven by per-
 - Separate memory history per mode, even for the same note.
 - Deck picker and mode picker before each review session.
 - Navigator context menu action `New Flashcard` for deck folders.
-- AI completion button for card editing using local Ollama.
+- Navigator context menu action `Batch Create Flashcards` for deck folders.
+- AI completion button for card editing using Ollama or Volcano Engine.
 - Nested deck protection (parent/child deck directories are rejected).
 - Daily limits for new cards and review cards.
 
@@ -114,14 +115,25 @@ Quick note creation:
 - The plugin creates a new note template with all required sections as empty H1 blocks.
 - Default note name is `deckName.####` (four-digit index), for example `Swedish.0007`.
 
+Batch note creation:
+
+- Run command `Batch Create Flashcards` (or right-click a deck folder and choose `Batch Create Flashcards`).
+- Select one section from the deck `requiredSections` as the input field to seed.
+- Paste source text and set a delimiter. Default delimiter is `\n` (one new card per line).
+- Confirm creation, then the plugin splits your input and creates one new card per segment.
+- Each new card gets all required sections; only the selected section is pre-filled with that segment.
+
 AI completion while editing:
 
 - Open a flashcard note inside a configured deck.
 - Use the status bar button `AI Complete` to batch-fill all incomplete cards in the current deck.
+- Deck progress only counts eligible cards (cards that actually have a valid AI completion plan).
+- Cards that are not eligible are skipped silently (not included in progress totals and not logged as skipped).
+- Click `AI Complete` again while it is running to cancel remaining deck operations.
 - Use command `AI Complete Current Flashcard` when you only want to fill the current note.
 - The plugin finds the first required section that already has content and uses that as the source prompt.
 - It then looks for the first empty required section that has an `ai.prompts[source][target]` mapping.
-- The note content plus that configured prompt suffix is sent to local Ollama, and the returned text is written into the target section.
+- The note content plus that configured prompt suffix is sent to the configured AI provider, and the returned text is written into the target section.
 
 Volcano Engine example:
 

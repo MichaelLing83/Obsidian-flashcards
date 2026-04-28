@@ -1,6 +1,6 @@
 {
   "name": "obsidian-flashcards",
-  "version": "1.0.1",
+  "version": "1.0.4",
   "description": "Obsidian plugin: use vault directories as flashcard decks with spaced repetition",
   "main": "main.js",
   "scripts": {
