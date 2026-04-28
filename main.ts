@@ -91,6 +91,7 @@ interface FlashcardsSettings {
 	maxReviewsPerDay: number;
 	cardFontSizePx: number;
 	deckFontSizePxByPath: Record<string, number>;
+	aiCompleteRetryCount: number;
 }
 
 const DEFAULT_SETTINGS: FlashcardsSettings = {
@@ -98,6 +99,7 @@ const DEFAULT_SETTINGS: FlashcardsSettings = {
 	maxReviewsPerDay: 100,
 	cardFontSizePx: 22,
 	deckFontSizePxByPath: {},
+	aiCompleteRetryCount: 3,
 };
 
 const DEFAULT_EASE = 2.5;
@@ -108,6 +110,8 @@ const MIN_CARD_FONT_SIZE_PX = 14;
 const MAX_CARD_FONT_SIZE_PX = 48;
 const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 const DEFAULT_VOLCENGINE_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
+const MIN_AI_RETRY_COUNT = 0;
+const MAX_AI_RETRY_COUNT = 10;
 
 /** View type identifier. */
 const VIEW_TYPE_FLASHCARD = "flashcard-study-view";
@@ -657,6 +661,13 @@ export class FlashcardView extends ItemView {
 
 	async onOpen(): Promise<void> {
 		this.registerKeyboardShortcuts();
+		this.registerEvent(
+			this.app.workspace.on("active-leaf-change", () => {
+				if (this.isActiveView() && this.canOperateOnCurrentCard()) {
+					this.render();
+				}
+			}),
+		);
 		await this.startSession();
 	}
 
@@ -947,6 +958,12 @@ export class FlashcardView extends ItemView {
 		await this.plugin.batchCreateFlashcardsFromFolder(this.activeSelection.deck.folder);
 	}
 
+	private async openCardForEditing(file: TFile): Promise<void> {
+		const leaf = this.app.workspace.getLeaf("tab");
+		await leaf.openFile(file);
+		this.app.workspace.revealLeaf(leaf);
+	}
+
 	private async openQueueErrorFile(): Promise<void> {
 		if (!this.queueBuildErrorFilePath) return;
 		const target = this.app.vault.getAbstractFileByPath(this.queueBuildErrorFilePath);
@@ -977,8 +994,25 @@ export class FlashcardView extends ItemView {
 		this.renderDeckFontSizeControl(el);
 	}
 
+	private async refreshCardContentFromFile(card: StudyCard): Promise<void> {
+		if (!this.activeSelection) return;
+
+		try {
+			const raw = await this.app.vault.read(card.file);
+			const sections = parseTopLevelSections(raw);
+			card.front = sections.get(this.activeSelection.instance.promptSection)?.trim() ?? "";
+			card.back = sections.get(this.activeSelection.instance.answerSection)?.trim() ?? "";
+		} catch (error) {
+			console.error("Flashcards: failed to refresh card content", {
+				filePath: card.file.path,
+				error,
+			});
+		}
+	}
+
 	private async renderCard(el: HTMLElement): Promise<void> {
 		const card = this.queue[this.idx];
+		await this.refreshCardContentFromFile(card);
 		const rec = this.plugin.cardData[card.id];
 		const front = card.front;
 		const back = card.back;
@@ -1042,6 +1076,14 @@ export class FlashcardView extends ItemView {
 
 		// ── Footer ───────────────────────────────────────────────────────
 		const footer = el.createDiv({ cls: "flashcard-footer" });
+		const editBtn = footer.createEl("button", {
+			cls: "flashcard-btn flashcard-btn-secondary",
+			text: "Edit Card",
+		});
+		editBtn.addEventListener("click", () =>
+			void this.openCardForEditing(card.file),
+		);
+
 		if (this.activeSelection) {
 			const newBtn = footer.createEl("button", {
 				cls: "flashcard-btn flashcard-btn-primary flashcard-btn-new-note",
@@ -1236,6 +1278,20 @@ class FlashcardsSettingTab extends PluginSettingTab {
 		});
 		desc.textContent =
 			"Each deck folder must contain a config file named <deck_dir>.flashcards in JSON format.";
+
+		new Setting(containerEl)
+			.setName("AI Complete Retry Count")
+			.setDesc("How many retries are allowed per flashcard when AI generation fails.")
+			.addSlider((slider) =>
+				slider
+					.setLimits(MIN_AI_RETRY_COUNT, MAX_AI_RETRY_COUNT, 1)
+					.setValue(this.plugin.settings.aiCompleteRetryCount)
+					.setDynamicTooltip()
+					.onChange(async (value) => {
+						this.plugin.settings.aiCompleteRetryCount = value;
+						await this.plugin.persistData();
+					}),
+			);
 
 		const ul = containerEl.createEl("ul");
 		ul.createEl("li", {
@@ -1465,6 +1521,13 @@ export default class FlashcardsPlugin extends Plugin {
 			cardFontSizePx: Math.max(
 				MIN_CARD_FONT_SIZE_PX,
 				Math.min(MAX_CARD_FONT_SIZE_PX, Number(merged.cardFontSizePx) || DEFAULT_SETTINGS.cardFontSizePx),
+			),
+			aiCompleteRetryCount: Math.max(
+				MIN_AI_RETRY_COUNT,
+				Math.min(
+					MAX_AI_RETRY_COUNT,
+					Number(merged.aiCompleteRetryCount ?? DEFAULT_SETTINGS.aiCompleteRetryCount),
+				),
 			),
 			deckFontSizePxByPath:
 				typeof merged.deckFontSizePxByPath === "object" && merged.deckFontSizePxByPath
@@ -1786,33 +1849,55 @@ export default class FlashcardsPlugin extends Plugin {
 		this.logDebug("AI single start", {
 			filePath: task.file.path,
 			deckPath: task.file.parent?.path ?? "",
+			retryCount: this.settings.aiCompleteRetryCount,
 		});
 
 		this.logAiPlan(task.file.path, task.plan.sourceSection, task.plan.targetSection);
 		const prompt = buildPromptFromSource(task.plan.sourceContent, task.plan.instruction);
+		const maxAttempts = this.settings.aiCompleteRetryCount + 1;
 
-		try {
-			const output = await this.generateAiOutput(task.plan.aI, prompt);
-			const updated = replaceTopLevelSectionContent(task.raw, task.plan.targetSection, output);
-			if (!updated.updated) {
-				this.logDebug("AI single failed: target section not found", {
+		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+			try {
+				const output = await this.generateAiOutput(task.plan.aI, prompt);
+				const updated = replaceTopLevelSectionContent(task.raw, task.plan.targetSection, output);
+				if (!updated.updated) {
+					this.logDebug("AI single failed: target section not found", {
+						filePath: task.file.path,
+						targetSection: task.plan.targetSection,
+					});
+					return "failed";
+				}
+
+				await this.app.vault.modify(task.file, updated.updatedMarkdown);
+				this.logDebug("AI single filled", {
 					filePath: task.file.path,
 					targetSection: task.plan.targetSection,
+					outputLength: output.length,
+					attempt,
+				});
+				return "filled";
+			} catch (error) {
+				if (attempt < maxAttempts) {
+					this.logDebug("AI single retry", {
+						filePath: task.file.path,
+						attempt,
+						nextAttempt: attempt + 1,
+						error: error instanceof Error ? error.message : String(error),
+					});
+					continue;
+				}
+
+				console.error(`${DEBUG_PREFIX} AI completion failed`, {
+					file: task.file.path,
+					attempt,
+					maxAttempts,
+					error,
 				});
 				return "failed";
 			}
-
-			await this.app.vault.modify(task.file, updated.updatedMarkdown);
-			this.logDebug("AI single filled", {
-				filePath: task.file.path,
-				targetSection: task.plan.targetSection,
-				outputLength: output.length,
-			});
-			return "filled";
-		} catch (error) {
-			console.error(`${DEBUG_PREFIX} AI completion failed`, { file: task.file.path, error });
-			return "failed";
 		}
+
+		return "failed";
 	}
 
 	private async completeSingleFlashcardWithAi(

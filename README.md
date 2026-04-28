@@ -109,6 +109,11 @@ Keyboard shortcuts in study view:
 - `3`: Good
 - `4`: Easy
 
+Editing while reviewing:
+
+- Use `Edit Card` in the Flashcards footer to open the current card note in an editor tab.
+- After editing, return to the Flashcards tab to continue review.
+
 Quick note creation:
 
 - In navigator, right-click a deck folder (one that has `<deck_dir>.flashcards`) and choose `New Flashcard`.
@@ -130,6 +135,7 @@ AI completion while editing:
 - Deck progress only counts eligible cards (cards that actually have a valid AI completion plan).
 - Cards that are not eligible are skipped silently (not included in progress totals and not logged as skipped).
 - Click `AI Complete` again while it is running to cancel remaining deck operations.
+- `AI Complete Retry Count` in Settings controls retry attempts per card on AI failure (default: 3).
 - Use command `AI Complete Current Flashcard` when you only want to fill the current note.
 - The plugin finds the first required section that already has content and uses that as the source prompt.
 - It then looks for the first empty required section that has an `ai.prompts[source][target]` mapping.

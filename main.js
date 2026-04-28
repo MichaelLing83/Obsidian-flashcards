@@ -34,7 +34,8 @@ var DEFAULT_SETTINGS = {
   newCardsPerDay: 20,
   maxReviewsPerDay: 100,
   cardFontSizePx: 22,
-  deckFontSizePxByPath: {}
+  deckFontSizePxByPath: {},
+  aiCompleteRetryCount: 3
 };
 var DEFAULT_EASE = 2.5;
 var MIN_EASE = 1.3;
@@ -44,6 +45,8 @@ var MIN_CARD_FONT_SIZE_PX = 14;
 var MAX_CARD_FONT_SIZE_PX = 48;
 var DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 var DEFAULT_VOLCENGINE_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
+var MIN_AI_RETRY_COUNT = 0;
+var MAX_AI_RETRY_COUNT = 10;
 var VIEW_TYPE_FLASHCARD = "flashcard-study-view";
 var QUALITY = [1, 3, 4, 5];
 function nextInterval(rating, rec) {
@@ -439,6 +442,13 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
   }
   async onOpen() {
     this.registerKeyboardShortcuts();
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", () => {
+        if (this.isActiveView() && this.canOperateOnCurrentCard()) {
+          this.render();
+        }
+      })
+    );
     await this.startSession();
   }
   registerKeyboardShortcuts() {
@@ -670,6 +680,11 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
     if (!this.activeSelection) return;
     await this.plugin.batchCreateFlashcardsFromFolder(this.activeSelection.deck.folder);
   }
+  async openCardForEditing(file) {
+    const leaf = this.app.workspace.getLeaf("tab");
+    await leaf.openFile(file);
+    this.app.workspace.revealLeaf(leaf);
+  }
   async openQueueErrorFile() {
     if (!this.queueBuildErrorFilePath) return;
     const target = this.app.vault.getAbstractFileByPath(this.queueBuildErrorFilePath);
@@ -696,9 +711,25 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
     btn.addEventListener("click", () => void this.startSession());
     this.renderDeckFontSizeControl(el);
   }
+  async refreshCardContentFromFile(card) {
+    var _a, _b, _c, _d;
+    if (!this.activeSelection) return;
+    try {
+      const raw = await this.app.vault.read(card.file);
+      const sections = parseTopLevelSections(raw);
+      card.front = (_b = (_a = sections.get(this.activeSelection.instance.promptSection)) == null ? void 0 : _a.trim()) != null ? _b : "";
+      card.back = (_d = (_c = sections.get(this.activeSelection.instance.answerSection)) == null ? void 0 : _c.trim()) != null ? _d : "";
+    } catch (error) {
+      console.error("Flashcards: failed to refresh card content", {
+        filePath: card.file.path,
+        error
+      });
+    }
+  }
   async renderCard(el) {
     var _a, _b, _c, _d;
     const card = this.queue[this.idx];
+    await this.refreshCardContentFromFile(card);
     const rec = this.plugin.cardData[card.id];
     const front = card.front;
     const back = card.back;
@@ -745,6 +776,14 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
       await this.renderMarkdown(back, backContent, card.file.path);
     }
     const footer = el.createDiv({ cls: "flashcard-footer" });
+    const editBtn = footer.createEl("button", {
+      cls: "flashcard-btn flashcard-btn-secondary",
+      text: "Edit Card"
+    });
+    editBtn.addEventListener(
+      "click",
+      () => void this.openCardForEditing(card.file)
+    );
     if (this.activeSelection) {
       const newBtn = footer.createEl("button", {
         cls: "flashcard-btn flashcard-btn-primary flashcard-btn-new-note",
@@ -886,6 +925,12 @@ var FlashcardsSettingTab = class extends import_obsidian.PluginSettingTab {
       cls: "setting-item-description"
     });
     desc.textContent = "Each deck folder must contain a config file named <deck_dir>.flashcards in JSON format.";
+    new import_obsidian.Setting(containerEl).setName("AI Complete Retry Count").setDesc("How many retries are allowed per flashcard when AI generation fails.").addSlider(
+      (slider) => slider.setLimits(MIN_AI_RETRY_COUNT, MAX_AI_RETRY_COUNT, 1).setValue(this.plugin.settings.aiCompleteRetryCount).setDynamicTooltip().onChange(async (value) => {
+        this.plugin.settings.aiCompleteRetryCount = value;
+        await this.plugin.persistData();
+      })
+    );
     const ul = containerEl.createEl("ul");
     ul.createEl("li", {
       text: "Config filename must match folder name, e.g. deck_dir/deck_dir.flashcards."
@@ -1073,7 +1118,7 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
     );
   }
   async onload() {
-    var _a, _b;
+    var _a, _b, _c;
     const stored = await this.loadData();
     const merged = Object.assign({}, DEFAULT_SETTINGS, (_a = stored == null ? void 0 : stored.settings) != null ? _a : {});
     this.settings = {
@@ -1083,13 +1128,20 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
         MIN_CARD_FONT_SIZE_PX,
         Math.min(MAX_CARD_FONT_SIZE_PX, Number(merged.cardFontSizePx) || DEFAULT_SETTINGS.cardFontSizePx)
       ),
+      aiCompleteRetryCount: Math.max(
+        MIN_AI_RETRY_COUNT,
+        Math.min(
+          MAX_AI_RETRY_COUNT,
+          Number((_b = merged.aiCompleteRetryCount) != null ? _b : DEFAULT_SETTINGS.aiCompleteRetryCount)
+        )
+      ),
       deckFontSizePxByPath: typeof merged.deckFontSizePxByPath === "object" && merged.deckFontSizePxByPath ? Object.fromEntries(
         Object.entries(merged.deckFontSizePxByPath).map(([path, size]) => [path, Number(size)]).filter(
           ([path, size]) => typeof path === "string" && path.length > 0 && Number.isFinite(size) && size >= MIN_CARD_FONT_SIZE_PX && size <= MAX_CARD_FONT_SIZE_PX
         )
       ) : {}
     };
-    this.cardData = (_b = stored == null ? void 0 : stored.cards) != null ? _b : {};
+    this.cardData = (_c = stored == null ? void 0 : stored.cards) != null ? _c : {};
     this.registerView(
       VIEW_TYPE_FLASHCARD,
       (leaf) => new FlashcardView(leaf, this)
@@ -1307,31 +1359,51 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
     var _a, _b;
     this.logDebug("AI single start", {
       filePath: task.file.path,
-      deckPath: (_b = (_a = task.file.parent) == null ? void 0 : _a.path) != null ? _b : ""
+      deckPath: (_b = (_a = task.file.parent) == null ? void 0 : _a.path) != null ? _b : "",
+      retryCount: this.settings.aiCompleteRetryCount
     });
     this.logAiPlan(task.file.path, task.plan.sourceSection, task.plan.targetSection);
     const prompt = buildPromptFromSource(task.plan.sourceContent, task.plan.instruction);
-    try {
-      const output = await this.generateAiOutput(task.plan.aI, prompt);
-      const updated = replaceTopLevelSectionContent(task.raw, task.plan.targetSection, output);
-      if (!updated.updated) {
-        this.logDebug("AI single failed: target section not found", {
+    const maxAttempts = this.settings.aiCompleteRetryCount + 1;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const output = await this.generateAiOutput(task.plan.aI, prompt);
+        const updated = replaceTopLevelSectionContent(task.raw, task.plan.targetSection, output);
+        if (!updated.updated) {
+          this.logDebug("AI single failed: target section not found", {
+            filePath: task.file.path,
+            targetSection: task.plan.targetSection
+          });
+          return "failed";
+        }
+        await this.app.vault.modify(task.file, updated.updatedMarkdown);
+        this.logDebug("AI single filled", {
           filePath: task.file.path,
-          targetSection: task.plan.targetSection
+          targetSection: task.plan.targetSection,
+          outputLength: output.length,
+          attempt
+        });
+        return "filled";
+      } catch (error) {
+        if (attempt < maxAttempts) {
+          this.logDebug("AI single retry", {
+            filePath: task.file.path,
+            attempt,
+            nextAttempt: attempt + 1,
+            error: error instanceof Error ? error.message : String(error)
+          });
+          continue;
+        }
+        console.error(`${DEBUG_PREFIX} AI completion failed`, {
+          file: task.file.path,
+          attempt,
+          maxAttempts,
+          error
         });
         return "failed";
       }
-      await this.app.vault.modify(task.file, updated.updatedMarkdown);
-      this.logDebug("AI single filled", {
-        filePath: task.file.path,
-        targetSection: task.plan.targetSection,
-        outputLength: output.length
-      });
-      return "filled";
-    } catch (error) {
-      console.error(`${DEBUG_PREFIX} AI completion failed`, { file: task.file.path, error });
-      return "failed";
     }
+    return "failed";
   }
   async completeSingleFlashcardWithAi(file, deck) {
     const task = await this.prepareAiCompletionTask(file, deck);
