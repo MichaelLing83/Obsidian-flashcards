@@ -868,7 +868,7 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
     this.aiStatusBarEl = this.addStatusBarItem();
     this.aiStatusBarEl.addClass("mod-clickable");
     this.aiStatusBarEl.setText("AI Complete");
-    this.aiStatusBarEl.addEventListener("click", () => void this.completeCurrentFlashcardWithAi());
+    this.aiStatusBarEl.addEventListener("click", () => void this.completeCurrentDeckWithAi());
     this.addCommand({
       id: "ai-complete-current-flashcard",
       name: "AI Complete Current Flashcard",

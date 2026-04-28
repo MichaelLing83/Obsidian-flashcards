@@ -117,8 +117,8 @@ Quick note creation:
 AI completion while editing:
 
 - Open a flashcard note inside a configured deck.
-- Use the status bar button `AI Complete` for the current note.
-- Use command `AI Complete Current Deck` to batch-fill all incomplete cards in the current deck.
+- Use the status bar button `AI Complete` to batch-fill all incomplete cards in the current deck.
+- Use command `AI Complete Current Flashcard` when you only want to fill the current note.
 - The plugin finds the first required section that already has content and uses that as the source prompt.
 - It then looks for the first empty required section that has an `ai.prompts[source][target]` mapping.
 - The note content plus that configured prompt suffix is sent to local Ollama, and the returned text is written into the target section.
