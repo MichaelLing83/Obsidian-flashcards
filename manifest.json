@@ -1,7 +1,7 @@
 {
   "id": "obsidian-flashcards",
   "name": "Flashcards",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "main": "main.js",
   "minAppVersion": "0.15.0",
   "description": "Turn vault directories into flashcard decks with spaced-repetition (SM-2). Supports Basic and Basic+Reversed card types.",
