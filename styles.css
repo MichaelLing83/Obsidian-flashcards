@@ -288,6 +288,28 @@
 	padding: 8px 18px;
 }
 
+.flashcard-btn-icon {
+	padding: 8px 10px;
+	min-width: 2.25rem;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.flashcard-btn-icon:disabled {
+	opacity: 0.35;
+	cursor: not-allowed;
+}
+
+.flashcard-complete-actions {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: center;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+}
+
 /* ── Rating bar ─────────────────────────────────────────────────────────── */
 
 .flashcard-rating-bar {

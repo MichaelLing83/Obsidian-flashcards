@@ -9,6 +9,7 @@ import {
 	PluginSettingTab,
 	requestUrl,
 	Setting,
+	setIcon,
 	SuggestModal,
 	TAbstractFile,
 	TFile,
@@ -41,6 +42,20 @@ interface CardRecord {
 	interval: number;
 	/** Timestamp (ms) when the card is next due. */
 	dueDate: number;
+}
+
+/** Snapshot to undo one rating during the current session (restores SM-2 state). */
+interface RatingUndoEntry {
+	cardId: string;
+	recordBefore: CardRecord;
+	idxRated: number;
+}
+
+/** Snapshot to redo an undone rating. */
+interface RatingRedoEntry {
+	cardId: string;
+	recordAfter: CardRecord;
+	idxAfter: number;
 }
 
 /** Shape of the persisted data.json. */
@@ -133,6 +148,10 @@ function nextInterval(rating: Rating, rec: CardRecord): number {
 	if (rec.repetitions === 0) return 1;
 	if (rec.repetitions === 1) return 6;
 	return Math.round(rec.interval * rec.easeFactor);
+}
+
+function cloneCardRecord(rec: CardRecord): CardRecord {
+	return { ...rec };
 }
 
 /** Apply a rating to a card record and return the updated record. */
@@ -643,6 +662,8 @@ export class FlashcardView extends ItemView {
 	private queueBuildErrorFilePath = "";
 	private activeSelection: DeckInstanceSelection | null = null;
 	private keydownRegistered = false;
+	private ratingUndoStack: RatingUndoEntry[] = [];
+	private ratingRedoStack: RatingRedoEntry[] = [];
 
 	constructor(leaf: WorkspaceLeaf, plugin: FlashcardsPlugin) {
 		super(leaf);
@@ -679,6 +700,21 @@ export class FlashcardView extends ItemView {
 			if (!this.isActiveView()) return;
 			if (this.shouldIgnoreShortcut(evt.target)) return;
 
+			const mod = evt.metaKey || evt.ctrlKey;
+			if (mod && evt.key.toLowerCase() === "z") {
+				if (evt.shiftKey) {
+					if (this.canRedoRating()) {
+						evt.preventDefault();
+						void this.redoLastRating();
+						return;
+					}
+				} else if (this.canUndoRating()) {
+					evt.preventDefault();
+					void this.undoLastRating();
+					return;
+				}
+			}
+
 			if (evt.code === "Space" && !this.revealed && this.canOperateOnCurrentCard()) {
 				evt.preventDefault();
 				this.revealed = true;
@@ -713,6 +749,56 @@ export class FlashcardView extends ItemView {
 		return !this.queueBuildError && this.queue.length > 0 && this.idx < this.queue.length;
 	}
 
+	canUndoRating(): boolean {
+		return this.ratingUndoStack.length > 0;
+	}
+
+	canRedoRating(): boolean {
+		return this.ratingRedoStack.length > 0;
+	}
+
+	async undoLastRating(): Promise<void> {
+		const entry = this.ratingUndoStack.pop();
+		if (!entry) {
+			new Notice("Nothing to undo.");
+			return;
+		}
+		const cur = this.plugin.cardData[entry.cardId];
+		if (cur) {
+			this.ratingRedoStack.push({
+				cardId: entry.cardId,
+				recordAfter: cloneCardRecord(cur),
+				idxAfter: this.idx,
+			});
+		}
+		this.plugin.cardData[entry.cardId] = cloneCardRecord(entry.recordBefore);
+		await this.plugin.persistData();
+		this.idx = entry.idxRated;
+		this.revealed = true;
+		this.render();
+	}
+
+	async redoLastRating(): Promise<void> {
+		const entry = this.ratingRedoStack.pop();
+		if (!entry) {
+			new Notice("Nothing to redo.");
+			return;
+		}
+		const cur = this.plugin.cardData[entry.cardId];
+		if (cur) {
+			this.ratingUndoStack.push({
+				cardId: entry.cardId,
+				recordBefore: cloneCardRecord(cur),
+				idxRated: this.idx,
+			});
+		}
+		this.plugin.cardData[entry.cardId] = cloneCardRecord(entry.recordAfter);
+		await this.plugin.persistData();
+		this.idx = entry.idxAfter;
+		this.revealed = false;
+		this.render();
+	}
+
 	private keyToRating(evt: KeyboardEvent): Rating | null {
 		switch (evt.code) {
 			case "Digit1":
@@ -732,8 +818,14 @@ export class FlashcardView extends ItemView {
 		}
 	}
 
+	private clearRatingHistoryStacks(): void {
+		this.ratingUndoStack = [];
+		this.ratingRedoStack = [];
+	}
+
 	/** (Re-)build the study queue and render the first card. */
 	async startSession(): Promise<void> {
+		this.clearRatingHistoryStacks();
 		this.queueBuildError = "";
 		this.queueBuildErrorFilePath = "";
 		this.activeSelection = null;
@@ -986,7 +1078,15 @@ export class FlashcardView extends ItemView {
 			cls: "flashcard-state-body",
 			text: `You reviewed ${this.queue.length} card(s).`,
 		});
-		const btn = wrap.createEl("button", {
+		const btnRow = wrap.createDiv({ cls: "flashcard-complete-actions" });
+		if (this.canUndoRating()) {
+			const undoBtn = btnRow.createEl("button", {
+				cls: "flashcard-btn flashcard-btn-secondary",
+				text: "Undo last rating",
+			});
+			undoBtn.addEventListener("click", () => void this.undoLastRating());
+		}
+		const btn = btnRow.createEl("button", {
 			cls: "flashcard-btn flashcard-btn-primary",
 			text: "Start New Session",
 		});
@@ -1087,6 +1187,22 @@ export class FlashcardView extends ItemView {
 		// ── Footer (toolbar + rating on separate rows for narrow screens) ─
 		const footer = el.createDiv({ cls: "flashcard-footer" });
 		const toolbar = footer.createDiv({ cls: "flashcard-footer-toolbar" });
+		const undoBtn = toolbar.createEl("button", {
+			cls: "flashcard-btn flashcard-btn-secondary flashcard-btn-icon",
+			attr: { "aria-label": "Undo last rating", title: "Undo last rating (⌘/Ctrl+Z)" },
+		});
+		setIcon(undoBtn, "undo");
+		undoBtn.disabled = !this.canUndoRating();
+		undoBtn.addEventListener("click", () => void this.undoLastRating());
+
+		const redoBtn = toolbar.createEl("button", {
+			cls: "flashcard-btn flashcard-btn-secondary flashcard-btn-icon",
+			attr: { "aria-label": "Redo rating", title: "Redo rating (⌘/Ctrl+Shift+Z)" },
+		});
+		setIcon(redoBtn, "redo");
+		redoBtn.disabled = !this.canRedoRating();
+		redoBtn.addEventListener("click", () => void this.redoLastRating());
+
 		const editBtn = toolbar.createEl("button", {
 			cls: "flashcard-btn flashcard-btn-secondary",
 			text: "Edit Card",
@@ -1207,9 +1323,13 @@ export class FlashcardView extends ItemView {
 
 	private async submitRating(cardId: string, rating: Rating): Promise<void> {
 		const rec = this.plugin.cardData[cardId];
+		const idxRated = this.idx;
 		if (rec) {
+			const recordBefore = cloneCardRecord(rec);
 			this.plugin.cardData[cardId] = applyRating(rec, rating);
 			await this.plugin.persistData();
+			this.ratingUndoStack.push({ cardId, recordBefore, idxRated });
+			this.ratingRedoStack.length = 0;
 		}
 		this.idx++;
 		this.revealed = false;
@@ -1582,6 +1702,28 @@ export default class FlashcardsPlugin extends Plugin {
 			callback: () => void this.batchCreateFlashcards(),
 		});
 
+		this.addCommand({
+			id: "flashcards-undo-rating",
+			name: "Flashcards: Undo last rating",
+			checkCallback: (checking) => {
+				const view = this.getFlashcardView();
+				const ok = !!view?.canUndoRating();
+				if (!checking && ok) void view!.undoLastRating();
+				return ok;
+			},
+		});
+
+		this.addCommand({
+			id: "flashcards-redo-rating",
+			name: "Flashcards: Redo rating",
+			checkCallback: (checking) => {
+				const view = this.getFlashcardView();
+				const ok = !!view?.canRedoRating();
+				if (!checking && ok) void view!.redoLastRating();
+				return ok;
+			},
+		});
+
 		this.logDebug("plugin loaded", { version: this.manifest.version });
 		this.registerDeckFolderMenuHook();
 		this.registerAiCompletionUi();
@@ -1616,6 +1758,11 @@ export default class FlashcardsPlugin extends Plugin {
 		await leaf.setViewState({ type: VIEW_TYPE_FLASHCARD, active: true });
 		this.applyCardFontSizeToOpenViews();
 		workspace.revealLeaf(leaf);
+	}
+
+	/** Flashcards study view in the active leaf, if any (for commands). */
+	getFlashcardView(): FlashcardView | null {
+		return this.app.workspace.getActiveViewOfType(FlashcardView);
 	}
 
 	applyCardFontSizeToOpenViews(): void {

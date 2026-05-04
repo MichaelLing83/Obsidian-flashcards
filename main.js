@@ -56,6 +56,9 @@ function nextInterval(rating, rec) {
   if (rec.repetitions === 1) return 6;
   return Math.round(rec.interval * rec.easeFactor);
 }
+function cloneCardRecord(rec) {
+  return { ...rec };
+}
 function applyRating(rec, rating) {
   const q = QUALITY[rating];
   const interval = nextInterval(rating, rec);
@@ -429,6 +432,8 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
     this.queueBuildErrorFilePath = "";
     this.activeSelection = null;
     this.keydownRegistered = false;
+    this.ratingUndoStack = [];
+    this.ratingRedoStack = [];
     this.plugin = plugin;
   }
   getViewType() {
@@ -457,6 +462,20 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
     this.registerDomEvent(document, "keydown", (evt) => {
       if (!this.isActiveView()) return;
       if (this.shouldIgnoreShortcut(evt.target)) return;
+      const mod = evt.metaKey || evt.ctrlKey;
+      if (mod && evt.key.toLowerCase() === "z") {
+        if (evt.shiftKey) {
+          if (this.canRedoRating()) {
+            evt.preventDefault();
+            void this.redoLastRating();
+            return;
+          }
+        } else if (this.canUndoRating()) {
+          evt.preventDefault();
+          void this.undoLastRating();
+          return;
+        }
+      }
       if (evt.code === "Space" && !this.revealed && this.canOperateOnCurrentCard()) {
         evt.preventDefault();
         this.revealed = true;
@@ -484,6 +503,52 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
   canOperateOnCurrentCard() {
     return !this.queueBuildError && this.queue.length > 0 && this.idx < this.queue.length;
   }
+  canUndoRating() {
+    return this.ratingUndoStack.length > 0;
+  }
+  canRedoRating() {
+    return this.ratingRedoStack.length > 0;
+  }
+  async undoLastRating() {
+    const entry = this.ratingUndoStack.pop();
+    if (!entry) {
+      new import_obsidian.Notice("Nothing to undo.");
+      return;
+    }
+    const cur = this.plugin.cardData[entry.cardId];
+    if (cur) {
+      this.ratingRedoStack.push({
+        cardId: entry.cardId,
+        recordAfter: cloneCardRecord(cur),
+        idxAfter: this.idx
+      });
+    }
+    this.plugin.cardData[entry.cardId] = cloneCardRecord(entry.recordBefore);
+    await this.plugin.persistData();
+    this.idx = entry.idxRated;
+    this.revealed = true;
+    this.render();
+  }
+  async redoLastRating() {
+    const entry = this.ratingRedoStack.pop();
+    if (!entry) {
+      new import_obsidian.Notice("Nothing to redo.");
+      return;
+    }
+    const cur = this.plugin.cardData[entry.cardId];
+    if (cur) {
+      this.ratingUndoStack.push({
+        cardId: entry.cardId,
+        recordBefore: cloneCardRecord(cur),
+        idxRated: this.idx
+      });
+    }
+    this.plugin.cardData[entry.cardId] = cloneCardRecord(entry.recordAfter);
+    await this.plugin.persistData();
+    this.idx = entry.idxAfter;
+    this.revealed = false;
+    this.render();
+  }
   keyToRating(evt) {
     switch (evt.code) {
       case "Digit1":
@@ -502,8 +567,13 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
         return null;
     }
   }
+  clearRatingHistoryStacks() {
+    this.ratingUndoStack = [];
+    this.ratingRedoStack = [];
+  }
   /** (Re-)build the study queue and render the first card. */
   async startSession() {
+    this.clearRatingHistoryStacks();
     this.queueBuildError = "";
     this.queueBuildErrorFilePath = "";
     this.activeSelection = null;
@@ -705,7 +775,15 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
       cls: "flashcard-state-body",
       text: `You reviewed ${this.queue.length} card(s).`
     });
-    const btn = wrap.createEl("button", {
+    const btnRow = wrap.createDiv({ cls: "flashcard-complete-actions" });
+    if (this.canUndoRating()) {
+      const undoBtn = btnRow.createEl("button", {
+        cls: "flashcard-btn flashcard-btn-secondary",
+        text: "Undo last rating"
+      });
+      undoBtn.addEventListener("click", () => void this.undoLastRating());
+    }
+    const btn = btnRow.createEl("button", {
       cls: "flashcard-btn flashcard-btn-primary",
       text: "Start New Session"
     });
@@ -786,6 +864,20 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
     }
     const footer = el.createDiv({ cls: "flashcard-footer" });
     const toolbar = footer.createDiv({ cls: "flashcard-footer-toolbar" });
+    const undoBtn = toolbar.createEl("button", {
+      cls: "flashcard-btn flashcard-btn-secondary flashcard-btn-icon",
+      attr: { "aria-label": "Undo last rating", title: "Undo last rating (\u2318/Ctrl+Z)" }
+    });
+    (0, import_obsidian.setIcon)(undoBtn, "undo");
+    undoBtn.disabled = !this.canUndoRating();
+    undoBtn.addEventListener("click", () => void this.undoLastRating());
+    const redoBtn = toolbar.createEl("button", {
+      cls: "flashcard-btn flashcard-btn-secondary flashcard-btn-icon",
+      attr: { "aria-label": "Redo rating", title: "Redo rating (\u2318/Ctrl+Shift+Z)" }
+    });
+    (0, import_obsidian.setIcon)(redoBtn, "redo");
+    redoBtn.disabled = !this.canRedoRating();
+    redoBtn.addEventListener("click", () => void this.redoLastRating());
     const editBtn = toolbar.createEl("button", {
       cls: "flashcard-btn flashcard-btn-secondary",
       text: "Edit Card"
@@ -891,9 +983,13 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
   }
   async submitRating(cardId, rating) {
     const rec = this.plugin.cardData[cardId];
+    const idxRated = this.idx;
     if (rec) {
+      const recordBefore = cloneCardRecord(rec);
       this.plugin.cardData[cardId] = applyRating(rec, rating);
       await this.plugin.persistData();
+      this.ratingUndoStack.push({ cardId, recordBefore, idxRated });
+      this.ratingRedoStack.length = 0;
     }
     this.idx++;
     this.revealed = false;
@@ -1171,6 +1267,26 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
       name: "Batch Create Flashcards",
       callback: () => void this.batchCreateFlashcards()
     });
+    this.addCommand({
+      id: "flashcards-undo-rating",
+      name: "Flashcards: Undo last rating",
+      checkCallback: (checking) => {
+        const view = this.getFlashcardView();
+        const ok = !!(view == null ? void 0 : view.canUndoRating());
+        if (!checking && ok) void view.undoLastRating();
+        return ok;
+      }
+    });
+    this.addCommand({
+      id: "flashcards-redo-rating",
+      name: "Flashcards: Redo rating",
+      checkCallback: (checking) => {
+        const view = this.getFlashcardView();
+        const ok = !!(view == null ? void 0 : view.canRedoRating());
+        if (!checking && ok) void view.redoLastRating();
+        return ok;
+      }
+    });
     this.logDebug("plugin loaded", { version: this.manifest.version });
     this.registerDeckFolderMenuHook();
     this.registerAiCompletionUi();
@@ -1200,6 +1316,10 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
     await leaf.setViewState({ type: VIEW_TYPE_FLASHCARD, active: true });
     this.applyCardFontSizeToOpenViews();
     workspace.revealLeaf(leaf);
+  }
+  /** Flashcards study view in the active leaf, if any (for commands). */
+  getFlashcardView() {
+    return this.app.workspace.getActiveViewOfType(FlashcardView);
   }
   applyCardFontSizeToOpenViews() {
     for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_FLASHCARD)) {
