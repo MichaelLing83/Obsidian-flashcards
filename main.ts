@@ -946,6 +946,7 @@ export class FlashcardView extends ItemView {
 		btn.addEventListener("click", () => void this.startSession());
 
 		this.renderDeckFontSizeControl(el);
+		this.renderPluginVersion(wrap);
 	}
 
 	private async createFlashcardInActiveDeck(): Promise<void> {
@@ -992,6 +993,14 @@ export class FlashcardView extends ItemView {
 		btn.addEventListener("click", () => void this.startSession());
 
 		this.renderDeckFontSizeControl(el);
+		this.renderPluginVersion(wrap);
+	}
+
+	private renderPluginVersion(parent: HTMLElement): void {
+		parent.createDiv({
+			cls: "flashcard-version",
+			text: `v${this.plugin.manifest.version}`,
+		});
 	}
 
 	private async refreshCardContentFromFile(card: StudyCard): Promise<void> {
@@ -1026,6 +1035,7 @@ export class FlashcardView extends ItemView {
 			cls: "flashcard-progress-text",
 			text: `${this.idx + 1} / ${this.queue.length}`,
 		});
+		this.renderPluginVersion(progRow);
 
 		const bar = header.createDiv({ cls: "flashcard-progress-bar" });
 		bar.createDiv({

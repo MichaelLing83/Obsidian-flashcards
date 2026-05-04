@@ -671,6 +671,7 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
     });
     btn.addEventListener("click", () => void this.startSession());
     this.renderDeckFontSizeControl(el);
+    this.renderPluginVersion(wrap);
   }
   async createFlashcardInActiveDeck() {
     if (!this.activeSelection) return;
@@ -710,6 +711,13 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
     });
     btn.addEventListener("click", () => void this.startSession());
     this.renderDeckFontSizeControl(el);
+    this.renderPluginVersion(wrap);
+  }
+  renderPluginVersion(parent) {
+    parent.createDiv({
+      cls: "flashcard-version",
+      text: `v${this.plugin.manifest.version}`
+    });
   }
   async refreshCardContentFromFile(card) {
     var _a, _b, _c, _d;
@@ -739,6 +747,7 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
       cls: "flashcard-progress-text",
       text: `${this.idx + 1} / ${this.queue.length}`
     });
+    this.renderPluginVersion(progRow);
     const bar = header.createDiv({ cls: "flashcard-progress-bar" });
     bar.createDiv({
       cls: "flashcard-progress-fill",

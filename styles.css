@@ -64,6 +64,22 @@
 .flashcard-progress-row {
 	display: flex;
 	justify-content: flex-end;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 8px 12px;
+	width: 100%;
+	min-width: 0;
+}
+
+.flashcard-version {
+	font-size: 0.72em;
+	color: var(--text-faint);
+	flex-shrink: 0;
+	white-space: nowrap;
+}
+
+.flashcard-state .flashcard-version {
+	margin-top: 8px;
 }
 
 .flashcard-progress-text {
