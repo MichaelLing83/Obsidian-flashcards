@@ -1074,9 +1074,10 @@ export class FlashcardView extends ItemView {
 			await this.renderMarkdown(back, backContent, card.file.path);
 		}
 
-		// ── Footer ───────────────────────────────────────────────────────
+		// ── Footer (toolbar + rating on separate rows for narrow screens) ─
 		const footer = el.createDiv({ cls: "flashcard-footer" });
-		const editBtn = footer.createEl("button", {
+		const toolbar = footer.createDiv({ cls: "flashcard-footer-toolbar" });
+		const editBtn = toolbar.createEl("button", {
 			cls: "flashcard-btn flashcard-btn-secondary",
 			text: "Edit Card",
 		});
@@ -1085,7 +1086,7 @@ export class FlashcardView extends ItemView {
 		);
 
 		if (this.activeSelection) {
-			const newBtn = footer.createEl("button", {
+			const newBtn = toolbar.createEl("button", {
 				cls: "flashcard-btn flashcard-btn-primary flashcard-btn-new-note",
 				text: "New Flashcard",
 			});
@@ -1093,7 +1094,7 @@ export class FlashcardView extends ItemView {
 				void this.createFlashcardInActiveDeck(),
 			);
 
-			const batchBtn = footer.createEl("button", {
+			const batchBtn = toolbar.createEl("button", {
 				cls: "flashcard-btn flashcard-btn-show",
 				text: "Batch Create",
 			});
@@ -1103,7 +1104,7 @@ export class FlashcardView extends ItemView {
 		}
 
 		if (!this.revealed) {
-			const showBtn = footer.createEl("button", {
+			const showBtn = toolbar.createEl("button", {
 				cls: "flashcard-btn flashcard-btn-show",
 				text: "Show Answer",
 			});

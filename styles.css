@@ -10,6 +10,7 @@
 	display: flex;
 	flex-direction: column;
 	height: 100%;
+	min-height: 0;
 	--flashcard-font-size: 22px;
 	padding: 16px;
 	box-sizing: border-box;
@@ -56,6 +57,8 @@
 	display: flex;
 	flex-direction: column;
 	gap: 6px;
+	flex-shrink: 0;
+	min-width: 0;
 }
 
 .flashcard-progress-row {
@@ -86,7 +89,9 @@
 .flashcard-meta {
 	display: flex;
 	align-items: center;
+	flex-wrap: wrap;
 	gap: 8px;
+	min-width: 0;
 }
 
 .flashcard-type-label {
@@ -94,6 +99,8 @@
 	color: var(--text-faint);
 	text-transform: uppercase;
 	letter-spacing: 0.05em;
+	min-width: 0;
+	overflow-wrap: anywhere;
 }
 
 .flashcard-badge {
@@ -116,17 +123,18 @@
 /* ── Card face ──────────────────────────────────────────────────────────── */
 
 .flashcard-card {
-	flex: 1;
+	flex: 1 1 0;
 	background: var(--background-primary);
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 10px;
 	padding: 24px 28px;
-	min-height: 180px;
 	min-width: 0;
 	min-height: 0;
 	display: flex;
 	flex-direction: column;
+	overflow-x: hidden;
 	overflow-y: auto;
+	-webkit-overflow-scrolling: touch;
 	box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
 }
 
@@ -134,6 +142,8 @@
 	display: flex;
 	flex-direction: column;
 	gap: 10px;
+	min-height: 0;
+	min-width: 0;
 }
 
 .flashcard-side-label {
@@ -146,6 +156,16 @@
 .flashcard-content {
 	font-size: var(--flashcard-font-size);
 	line-height: 1.65;
+	min-width: 0;
+	overflow-wrap: anywhere;
+	word-break: break-word;
+}
+
+/* Markdown output can include wide tables/pre blocks; keep them inside the card. */
+.flashcard-content pre,
+.flashcard-content table {
+	max-width: 100%;
+	overflow-x: auto;
 }
 
 /* Ensure markdown rendered inside the card respects the card sizing. */
@@ -166,11 +186,22 @@
 
 .flashcard-footer {
 	display: flex;
-	justify-content: center;
-	align-items: flex-end;
+	flex-direction: column;
+	align-items: stretch;
 	flex-shrink: 0;
 	gap: 10px;
 	padding-top: 4px;
+	min-width: 0;
+	width: 100%;
+}
+
+.flashcard-footer-toolbar {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: center;
+	align-items: center;
+	gap: 8px;
+	min-width: 0;
 }
 
 .flashcard-font-control {
@@ -178,9 +209,12 @@
 	align-items: center;
 	justify-content: center;
 	flex-shrink: 0;
+	flex-wrap: wrap;
 	gap: 10px;
 	padding-top: 6px;
 	padding-bottom: 2px;
+	min-width: 0;
+	width: 100%;
 }
 
 .flashcard-font-control-label,
@@ -190,7 +224,10 @@
 }
 
 .flashcard-font-control-slider {
-	width: min(320px, 52vw);
+	flex: 1 1 auto;
+	width: 100%;
+	max-width: min(320px, 100%);
+	min-width: 0;
 }
 
 /* Base button */
@@ -238,17 +275,30 @@
 /* ── Rating bar ─────────────────────────────────────────────────────────── */
 
 .flashcard-rating-bar {
-	display: flex;
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
 	gap: 8px;
-	justify-content: center;
-	flex-wrap: wrap;
+	width: 100%;
+	min-width: 0;
+}
+
+@media (min-width: 480px) {
+	.flashcard-rating-bar {
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+	}
 }
 
 .flashcard-rating-cell {
 	display: flex;
 	flex-direction: column;
-	align-items: center;
+	align-items: stretch;
 	gap: 4px;
+	min-width: 0;
+}
+
+.flashcard-rating-cell .flashcard-btn {
+	width: 100%;
+	box-sizing: border-box;
 }
 
 .flashcard-interval-label {
@@ -284,4 +334,25 @@
 .setting-item-description ul {
 	margin: 4px 0 0 0;
 	padding-left: 18px;
+}
+
+/* Narrow / foldable phone outer display */
+@media (max-width: 420px) {
+	.flashcard-container {
+		padding: 10px 12px;
+		gap: 8px;
+	}
+
+	.flashcard-card {
+		padding: 14px 16px;
+	}
+
+	.flashcard-btn {
+		padding: 8px 14px;
+		font-size: 0.88em;
+	}
+
+	.flashcard-btn-show {
+		padding: 10px 20px;
+	}
 }

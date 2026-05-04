@@ -776,7 +776,8 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
       await this.renderMarkdown(back, backContent, card.file.path);
     }
     const footer = el.createDiv({ cls: "flashcard-footer" });
-    const editBtn = footer.createEl("button", {
+    const toolbar = footer.createDiv({ cls: "flashcard-footer-toolbar" });
+    const editBtn = toolbar.createEl("button", {
       cls: "flashcard-btn flashcard-btn-secondary",
       text: "Edit Card"
     });
@@ -785,7 +786,7 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
       () => void this.openCardForEditing(card.file)
     );
     if (this.activeSelection) {
-      const newBtn = footer.createEl("button", {
+      const newBtn = toolbar.createEl("button", {
         cls: "flashcard-btn flashcard-btn-primary flashcard-btn-new-note",
         text: "New Flashcard"
       });
@@ -793,7 +794,7 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
         "click",
         () => void this.createFlashcardInActiveDeck()
       );
-      const batchBtn = footer.createEl("button", {
+      const batchBtn = toolbar.createEl("button", {
         cls: "flashcard-btn flashcard-btn-show",
         text: "Batch Create"
       });
@@ -803,7 +804,7 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
       );
     }
     if (!this.revealed) {
-      const showBtn = footer.createEl("button", {
+      const showBtn = toolbar.createEl("button", {
         cls: "flashcard-btn flashcard-btn-show",
         text: "Show Answer"
       });
