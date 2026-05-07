@@ -855,14 +855,14 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
     const toolbar = footer.createDiv({ cls: "flashcard-footer-toolbar" });
     const undoBtn = toolbar.createEl("button", {
       cls: "flashcard-btn flashcard-btn-secondary flashcard-btn-icon",
-      attr: { "aria-label": "Undo last rating", title: "Undo last rating (\u2318/Ctrl+Z)" }
+      attr: { "aria-label": "Undo last rating", title: "Undo last rating (\u2325+Z / Alt+Z)" }
     });
     (0, import_obsidian.setIcon)(undoBtn, "undo");
     undoBtn.disabled = !this.canUndoRating();
     undoBtn.addEventListener("click", () => void this.undoLastRating());
     const redoBtn = toolbar.createEl("button", {
       cls: "flashcard-btn flashcard-btn-secondary flashcard-btn-icon",
-      attr: { "aria-label": "Redo rating", title: "Redo rating (\u2318/Ctrl+Shift+Z)" }
+      attr: { "aria-label": "Redo rating", title: "Redo rating (\u2325+\u21E7+Z / Alt+Shift+Z)" }
     });
     (0, import_obsidian.setIcon)(redoBtn, "redo");
     redoBtn.disabled = !this.canRedoRating();
@@ -1021,7 +1021,7 @@ var FlashcardsSettingTab = class extends import_obsidian.PluginSettingTab {
     containerEl.createEl("h3", { text: "Study view shortcuts" });
     containerEl.createEl("p", {
       cls: "setting-item-description",
-      text: 'When the Flashcards study tab is focused, shortcuts use Ctrl/Cmd (Obsidian\u2019s \u201CMod\u201D) plus a key: Mod+A (show answer), Mod+E (edit), Mod+Shift+N (new in deck, avoids clashing with new note), Mod+B (batch for deck), Mod+1\u20134 (Again / Hard / Good / Easy), Mod+Z / Mod+Shift+Z (undo / redo rating). While typing in a note or text field, these are disabled. Change bindings under Obsidian Settings \u2192 Hotkeys, search "Flashcards".'
+      text: 'When the Flashcards study tab is focused, default shortcuts use Option/Alt plus a key (no Command/Ctrl): Option+A (show answer), Option+E (edit), Option+Shift+N (new in deck), Option+B (batch for deck), Option+1\u20134 (Again / Hard / Good / Easy), Option+Z / Option+Shift+Z (undo / redo rating). While typing in a note or text field, these are disabled. Change bindings under Obsidian Settings \u2192 Hotkeys, search "Flashcards".'
     });
     containerEl.createEl("h3", { text: "Deck Config File" });
     const desc = containerEl.createEl("p", {
@@ -1272,7 +1272,7 @@ var FlashcardsPlugin = class _FlashcardsPlugin extends import_obsidian.Plugin {
     this.addCommand({
       id: "flashcards-undo-rating",
       name: "Flashcards: Undo last rating",
-      hotkeys: [{ modifiers: ["Mod"], key: "z" }],
+      hotkeys: [{ modifiers: ["Alt"], key: "z" }],
       checkCallback: (checking) => {
         if (this.shouldDeferFlashcardStudyHotkeys()) return false;
         const view = this.getFlashcardView();
@@ -1284,7 +1284,7 @@ var FlashcardsPlugin = class _FlashcardsPlugin extends import_obsidian.Plugin {
     this.addCommand({
       id: "flashcards-redo-rating",
       name: "Flashcards: Redo rating",
-      hotkeys: [{ modifiers: ["Mod", "Shift"], key: "z" }],
+      hotkeys: [{ modifiers: ["Alt", "Shift"], key: "z" }],
       checkCallback: (checking) => {
         if (this.shouldDeferFlashcardStudyHotkeys()) return false;
         const view = this.getFlashcardView();
@@ -1400,7 +1400,7 @@ var FlashcardsPlugin = class _FlashcardsPlugin extends import_obsidian.Plugin {
     this.addCommand({
       id: "flashcards-study-show-answer",
       name: "Flashcards: Show answer (study view)",
-      hotkeys: [{ modifiers: ["Mod"], key: "a" }],
+      hotkeys: [{ modifiers: ["Alt"], key: "a" }],
       checkCallback: (checking) => runStudy(
         checking,
         (v) => v.canStudyShowAnswer(),
@@ -1410,7 +1410,7 @@ var FlashcardsPlugin = class _FlashcardsPlugin extends import_obsidian.Plugin {
     this.addCommand({
       id: "flashcards-study-edit-card",
       name: "Flashcards: Edit current card (study view)",
-      hotkeys: [{ modifiers: ["Mod"], key: "e" }],
+      hotkeys: [{ modifiers: ["Alt"], key: "e" }],
       checkCallback: (checking) => runStudy(
         checking,
         (v) => v.canStudyEditCard(),
@@ -1420,7 +1420,7 @@ var FlashcardsPlugin = class _FlashcardsPlugin extends import_obsidian.Plugin {
     this.addCommand({
       id: "flashcards-study-new-note",
       name: "Flashcards: New flashcard in current deck (study view)",
-      hotkeys: [{ modifiers: ["Mod", "Shift"], key: "n" }],
+      hotkeys: [{ modifiers: ["Alt", "Shift"], key: "n" }],
       checkCallback: (checking) => runStudy(
         checking,
         (v) => v.canStudyCreateInDeck(),
@@ -1430,7 +1430,7 @@ var FlashcardsPlugin = class _FlashcardsPlugin extends import_obsidian.Plugin {
     this.addCommand({
       id: "flashcards-study-batch-current-deck",
       name: "Flashcards: Batch create for current deck (study view)",
-      hotkeys: [{ modifiers: ["Mod"], key: "b" }],
+      hotkeys: [{ modifiers: ["Alt"], key: "b" }],
       checkCallback: (checking) => runStudy(
         checking,
         (v) => v.canStudyBatchCreateInDeck(),
@@ -1440,7 +1440,7 @@ var FlashcardsPlugin = class _FlashcardsPlugin extends import_obsidian.Plugin {
     const rate = (id, name, key, rating) => this.addCommand({
       id,
       name,
-      hotkeys: [{ modifiers: ["Mod"], key }],
+      hotkeys: [{ modifiers: ["Alt"], key }],
       checkCallback: (checking) => runStudy(
         checking,
         (v) => v.canStudyRate(),

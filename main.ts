@@ -1187,7 +1187,7 @@ export class FlashcardView extends ItemView {
 		const toolbar = footer.createDiv({ cls: "flashcard-footer-toolbar" });
 		const undoBtn = toolbar.createEl("button", {
 			cls: "flashcard-btn flashcard-btn-secondary flashcard-btn-icon",
-			attr: { "aria-label": "Undo last rating", title: "Undo last rating (⌘/Ctrl+Z)" },
+			attr: { "aria-label": "Undo last rating", title: "Undo last rating (⌥+Z / Alt+Z)" },
 		});
 		setIcon(undoBtn, "undo");
 		undoBtn.disabled = !this.canUndoRating();
@@ -1195,7 +1195,7 @@ export class FlashcardView extends ItemView {
 
 		const redoBtn = toolbar.createEl("button", {
 			cls: "flashcard-btn flashcard-btn-secondary flashcard-btn-icon",
-			attr: { "aria-label": "Redo rating", title: "Redo rating (⌘/Ctrl+Shift+Z)" },
+			attr: { "aria-label": "Redo rating", title: "Redo rating (⌥+⇧+Z / Alt+Shift+Z)" },
 		});
 		setIcon(redoBtn, "redo");
 		redoBtn.disabled = !this.canRedoRating();
@@ -1406,7 +1406,7 @@ class FlashcardsSettingTab extends PluginSettingTab {
 		containerEl.createEl("h3", { text: "Study view shortcuts" });
 		containerEl.createEl("p", {
 			cls: "setting-item-description",
-			text: 'When the Flashcards study tab is focused, shortcuts use Ctrl/Cmd (Obsidian’s “Mod”) plus a key: Mod+A (show answer), Mod+E (edit), Mod+Shift+N (new in deck, avoids clashing with new note), Mod+B (batch for deck), Mod+1–4 (Again / Hard / Good / Easy), Mod+Z / Mod+Shift+Z (undo / redo rating). While typing in a note or text field, these are disabled. Change bindings under Obsidian Settings → Hotkeys, search "Flashcards".',
+			text: 'When the Flashcards study tab is focused, default shortcuts use Option/Alt plus a key (no Command/Ctrl): Option+A (show answer), Option+E (edit), Option+Shift+N (new in deck), Option+B (batch for deck), Option+1–4 (Again / Hard / Good / Easy), Option+Z / Option+Shift+Z (undo / redo rating). While typing in a note or text field, these are disabled. Change bindings under Obsidian Settings → Hotkeys, search "Flashcards".',
 		});
 
 		// Help section
@@ -1717,7 +1717,7 @@ export default class FlashcardsPlugin extends Plugin {
 		this.addCommand({
 			id: "flashcards-undo-rating",
 			name: "Flashcards: Undo last rating",
-			hotkeys: [{ modifiers: ["Mod"], key: "z" }],
+			hotkeys: [{ modifiers: ["Alt"], key: "z" }],
 			checkCallback: (checking) => {
 				if (this.shouldDeferFlashcardStudyHotkeys()) return false;
 				const view = this.getFlashcardView();
@@ -1730,7 +1730,7 @@ export default class FlashcardsPlugin extends Plugin {
 		this.addCommand({
 			id: "flashcards-redo-rating",
 			name: "Flashcards: Redo rating",
-			hotkeys: [{ modifiers: ["Mod", "Shift"], key: "z" }],
+			hotkeys: [{ modifiers: ["Alt", "Shift"], key: "z" }],
 			checkCallback: (checking) => {
 				if (this.shouldDeferFlashcardStudyHotkeys()) return false;
 				const view = this.getFlashcardView();
@@ -1873,7 +1873,7 @@ export default class FlashcardsPlugin extends Plugin {
 		this.addCommand({
 			id: "flashcards-study-show-answer",
 			name: "Flashcards: Show answer (study view)",
-			hotkeys: [{ modifiers: ["Mod"], key: "a" }],
+			hotkeys: [{ modifiers: ["Alt"], key: "a" }],
 			checkCallback: (checking) =>
 				runStudy(
 					checking,
@@ -1885,7 +1885,7 @@ export default class FlashcardsPlugin extends Plugin {
 		this.addCommand({
 			id: "flashcards-study-edit-card",
 			name: "Flashcards: Edit current card (study view)",
-			hotkeys: [{ modifiers: ["Mod"], key: "e" }],
+			hotkeys: [{ modifiers: ["Alt"], key: "e" }],
 			checkCallback: (checking) =>
 				runStudy(
 					checking,
@@ -1897,7 +1897,7 @@ export default class FlashcardsPlugin extends Plugin {
 		this.addCommand({
 			id: "flashcards-study-new-note",
 			name: "Flashcards: New flashcard in current deck (study view)",
-			hotkeys: [{ modifiers: ["Mod", "Shift"], key: "n" }],
+			hotkeys: [{ modifiers: ["Alt", "Shift"], key: "n" }],
 			checkCallback: (checking) =>
 				runStudy(
 					checking,
@@ -1909,7 +1909,7 @@ export default class FlashcardsPlugin extends Plugin {
 		this.addCommand({
 			id: "flashcards-study-batch-current-deck",
 			name: "Flashcards: Batch create for current deck (study view)",
-			hotkeys: [{ modifiers: ["Mod"], key: "b" }],
+			hotkeys: [{ modifiers: ["Alt"], key: "b" }],
 			checkCallback: (checking) =>
 				runStudy(
 					checking,
@@ -1922,7 +1922,7 @@ export default class FlashcardsPlugin extends Plugin {
 			this.addCommand({
 				id,
 				name,
-				hotkeys: [{ modifiers: ["Mod"], key }],
+				hotkeys: [{ modifiers: ["Alt"], key }],
 				checkCallback: (checking) =>
 					runStudy(
 						checking,
