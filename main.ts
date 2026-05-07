@@ -661,7 +661,6 @@ export class FlashcardView extends ItemView {
 	private queueBuildError = "";
 	private queueBuildErrorFilePath = "";
 	private activeSelection: DeckInstanceSelection | null = null;
-	private keydownRegistered = false;
 	private ratingUndoStack: RatingUndoEntry[] = [];
 	private ratingRedoStack: RatingRedoEntry[] = [];
 
@@ -681,7 +680,6 @@ export class FlashcardView extends ItemView {
 	}
 
 	async onOpen(): Promise<void> {
-		this.registerKeyboardShortcuts();
 		this.registerEvent(
 			this.app.workspace.on("active-leaf-change", () => {
 				if (this.isActiveView() && this.canOperateOnCurrentCard()) {
@@ -692,57 +690,9 @@ export class FlashcardView extends ItemView {
 		await this.startSession();
 	}
 
-	private registerKeyboardShortcuts(): void {
-		if (this.keydownRegistered) return;
-		this.keydownRegistered = true;
-
-		this.registerDomEvent(document, "keydown", (evt: KeyboardEvent) => {
-			if (!this.isActiveView()) return;
-			if (this.shouldIgnoreShortcut(evt.target)) return;
-
-			const mod = evt.metaKey || evt.ctrlKey;
-			if (mod && evt.key.toLowerCase() === "z") {
-				if (evt.shiftKey) {
-					if (this.canRedoRating()) {
-						evt.preventDefault();
-						void this.redoLastRating();
-						return;
-					}
-				} else if (this.canUndoRating()) {
-					evt.preventDefault();
-					void this.undoLastRating();
-					return;
-				}
-			}
-
-			if (evt.code === "Space" && !this.revealed && this.canOperateOnCurrentCard()) {
-				evt.preventDefault();
-				this.revealed = true;
-				this.render();
-				return;
-			}
-
-			if (!this.revealed || !this.canOperateOnCurrentCard()) return;
-
-			const rating = this.keyToRating(evt);
-			if (rating === null) return;
-
-			evt.preventDefault();
-			const card = this.queue[this.idx];
-			void this.submitRating(card.id, rating);
-		});
-	}
-
 	private isActiveView(): boolean {
 		const active = this.app.workspace.getActiveViewOfType(FlashcardView);
 		return active === this;
-	}
-
-	private shouldIgnoreShortcut(target: EventTarget | null): boolean {
-		if (!(target instanceof HTMLElement)) return false;
-		if (target.isContentEditable) return true;
-		const tag = target.tagName;
-		return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
 	}
 
 	private canOperateOnCurrentCard(): boolean {
@@ -755,6 +705,59 @@ export class FlashcardView extends ItemView {
 
 	canRedoRating(): boolean {
 		return this.ratingRedoStack.length > 0;
+	}
+
+	/** Whether the study view can run actions on the current queued card. */
+	canStudyOperateOnCard(): boolean {
+		return this.canOperateOnCurrentCard();
+	}
+
+	canStudyShowAnswer(): boolean {
+		return this.canOperateOnCurrentCard() && !this.revealed;
+	}
+
+	studyShowAnswer(): void {
+		if (!this.canStudyShowAnswer()) return;
+		this.revealed = true;
+		this.render();
+	}
+
+	canStudyEditCard(): boolean {
+		return this.canOperateOnCurrentCard();
+	}
+
+	async studyEditCurrentCard(): Promise<void> {
+		if (!this.canStudyEditCard()) return;
+		const card = this.queue[this.idx];
+		await this.openCardForEditing(card.file);
+	}
+
+	canStudyCreateInDeck(): boolean {
+		return !!this.activeSelection;
+	}
+
+	async studyCreateNewInDeck(): Promise<void> {
+		if (!this.canStudyCreateInDeck()) return;
+		await this.createFlashcardInActiveDeck();
+	}
+
+	canStudyBatchCreateInDeck(): boolean {
+		return !!this.activeSelection;
+	}
+
+	async studyBatchCreateInDeck(): Promise<void> {
+		if (!this.canStudyBatchCreateInDeck()) return;
+		await this.batchCreateFlashcardsInActiveDeck();
+	}
+
+	canStudyRate(): boolean {
+		return this.canOperateOnCurrentCard() && this.revealed;
+	}
+
+	async studyRate(rating: Rating): Promise<void> {
+		if (!this.canStudyRate()) return;
+		const card = this.queue[this.idx];
+		await this.submitRating(card.id, rating);
 	}
 
 	async undoLastRating(): Promise<void> {
@@ -797,25 +800,6 @@ export class FlashcardView extends ItemView {
 		this.idx = entry.idxAfter;
 		this.revealed = false;
 		this.render();
-	}
-
-	private keyToRating(evt: KeyboardEvent): Rating | null {
-		switch (evt.code) {
-			case "Digit1":
-			case "Numpad1":
-				return 0;
-			case "Digit2":
-			case "Numpad2":
-				return 1;
-			case "Digit3":
-			case "Numpad3":
-				return 2;
-			case "Digit4":
-			case "Numpad4":
-				return 3;
-			default:
-				return null;
-		}
 	}
 
 	private clearRatingHistoryStacks(): void {
@@ -1391,6 +1375,12 @@ class FlashcardsSettingTab extends PluginSettingTab {
 					}),
 			);
 
+		containerEl.createEl("h3", { text: "Study view shortcuts" });
+		containerEl.createEl("p", {
+			cls: "setting-item-description",
+			text: 'When the Flashcards study tab is focused, you can use keyboard shortcuts for ratings and toolbar actions. Defaults include Space (show answer), E (edit current card), N (new note in deck), B (batch create for current deck), 1–4 (Again / Hard / Good / Easy), and Ctrl/Cmd+Z / Ctrl/Cmd+Shift+Z (undo / redo rating). To customize or add numpad keys, open Obsidian Settings → Hotkeys and search for "Flashcards".',
+		});
+
 		// Help section
 		containerEl.createEl("h3", { text: "Deck Config File" });
 		const desc = containerEl.createEl("p", {
@@ -1694,6 +1684,7 @@ export default class FlashcardsPlugin extends Plugin {
 		this.addCommand({
 			id: "flashcards-undo-rating",
 			name: "Flashcards: Undo last rating",
+			hotkeys: [{ modifiers: ["Mod"], key: "z" }],
 			checkCallback: (checking) => {
 				const view = this.getFlashcardView();
 				const ok = !!view?.canUndoRating();
@@ -1705,6 +1696,7 @@ export default class FlashcardsPlugin extends Plugin {
 		this.addCommand({
 			id: "flashcards-redo-rating",
 			name: "Flashcards: Redo rating",
+			hotkeys: [{ modifiers: ["Mod", "Shift"], key: "z" }],
 			checkCallback: (checking) => {
 				const view = this.getFlashcardView();
 				const ok = !!view?.canRedoRating();
@@ -1712,6 +1704,8 @@ export default class FlashcardsPlugin extends Plugin {
 				return ok;
 			},
 		});
+
+		this.registerFlashcardStudyCommands();
 
 		this.logDebug("plugin loaded", { version: this.manifest.version });
 		this.registerDeckFolderMenuHook();
@@ -1752,6 +1746,90 @@ export default class FlashcardsPlugin extends Plugin {
 	/** Flashcards study view in the active leaf, if any (for commands). */
 	getFlashcardView(): FlashcardView | null {
 		return this.app.workspace.getActiveViewOfType(FlashcardView);
+	}
+
+	/**
+	 * Study-view actions with default hotkeys. Users can change bindings in
+	 * Obsidian Settings → Hotkeys (search "Flashcards").
+	 */
+	private registerFlashcardStudyCommands(): void {
+		const runStudy = (
+			checking: boolean,
+			enabled: (view: FlashcardView) => boolean,
+			exec: (view: FlashcardView) => void | Promise<void>,
+		): boolean => {
+			const view = this.getFlashcardView();
+			if (!view) return false;
+			if (!enabled(view)) return false;
+			if (!checking) void exec(view);
+			return true;
+		};
+
+		this.addCommand({
+			id: "flashcards-study-show-answer",
+			name: "Flashcards: Show answer (study view)",
+			hotkeys: [{ modifiers: [], key: " " }],
+			checkCallback: (checking) =>
+				runStudy(
+					checking,
+					(v) => v.canStudyShowAnswer(),
+					(v) => v.studyShowAnswer(),
+				),
+		});
+
+		this.addCommand({
+			id: "flashcards-study-edit-card",
+			name: "Flashcards: Edit current card (study view)",
+			hotkeys: [{ modifiers: [], key: "e" }],
+			checkCallback: (checking) =>
+				runStudy(
+					checking,
+					(v) => v.canStudyEditCard(),
+					(v) => void v.studyEditCurrentCard(),
+				),
+		});
+
+		this.addCommand({
+			id: "flashcards-study-new-note",
+			name: "Flashcards: New flashcard in current deck (study view)",
+			hotkeys: [{ modifiers: [], key: "n" }],
+			checkCallback: (checking) =>
+				runStudy(
+					checking,
+					(v) => v.canStudyCreateInDeck(),
+					(v) => void v.studyCreateNewInDeck(),
+				),
+		});
+
+		this.addCommand({
+			id: "flashcards-study-batch-current-deck",
+			name: "Flashcards: Batch create for current deck (study view)",
+			hotkeys: [{ modifiers: [], key: "b" }],
+			checkCallback: (checking) =>
+				runStudy(
+					checking,
+					(v) => v.canStudyBatchCreateInDeck(),
+					(v) => void v.studyBatchCreateInDeck(),
+				),
+		});
+
+		const rate = (id: string, name: string, key: string, rating: Rating) =>
+			this.addCommand({
+				id,
+				name,
+				hotkeys: [{ modifiers: [], key }],
+				checkCallback: (checking) =>
+					runStudy(
+						checking,
+						(v) => v.canStudyRate(),
+						(v) => void v.studyRate(rating),
+					),
+			});
+
+		rate("flashcards-study-rate-again", "Flashcards: Rate Again (study view)", "1", 0);
+		rate("flashcards-study-rate-hard", "Flashcards: Rate Hard (study view)", "2", 1);
+		rate("flashcards-study-rate-good", "Flashcards: Rate Good (study view)", "3", 2);
+		rate("flashcards-study-rate-easy", "Flashcards: Rate Easy (study view)", "4", 3);
 	}
 
 	applyCardFontSizeToOpenViews(): void {
