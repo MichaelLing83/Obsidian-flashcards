@@ -101,13 +101,16 @@ Deck directories cannot be nested. If `parent/parent.flashcards` exists, then `p
 7. Use the bottom `Card Font` slider in the Flashcards view to set font size for the current deck (saved as that deck's default).
 8. Optionally adjust `Default Card Font Size` in Settings -> Flashcards as a fallback for decks without a saved size.
 
-Keyboard shortcuts in study view:
+Keyboard shortcuts in study view (Ctrl on Windows/Linux, Cmd on macOS):
 
-- `Space`: Show Answer
-- `1`: Again
-- `2`: Hard
-- `3`: Good
-- `4`: Easy
+- `Ctrl/Cmd+A`: Show Answer
+- `Ctrl/Cmd+E`: Edit current card
+- `Ctrl/Cmd+Shift+N`: New flashcard in current deck
+- `Ctrl/Cmd+B`: Batch create for current deck
+- `Ctrl/Cmd+1`–`4`: Again / Hard / Good / Easy
+- `Ctrl/Cmd+Z` / `Ctrl/Cmd+Shift+Z`: Undo / redo last rating
+
+Customize under Settings → Hotkeys, search “Flashcards”.
 
 Editing while reviewing:
 

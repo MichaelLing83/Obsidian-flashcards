@@ -1021,7 +1021,7 @@ var FlashcardsSettingTab = class extends import_obsidian.PluginSettingTab {
     containerEl.createEl("h3", { text: "Study view shortcuts" });
     containerEl.createEl("p", {
       cls: "setting-item-description",
-      text: 'When the Flashcards study tab is focused, you can use keyboard shortcuts for ratings and toolbar actions. Defaults include Space (show answer), E (edit current card), N (new note in deck), B (batch create for current deck), 1\u20134 (Again / Hard / Good / Easy), and Ctrl/Cmd+Z / Ctrl/Cmd+Shift+Z (undo / redo rating). While typing in a note or any text field, those shortcuts are disabled so keys like E work normally. To customize or add numpad keys, open Obsidian Settings \u2192 Hotkeys and search for "Flashcards".'
+      text: 'When the Flashcards study tab is focused, shortcuts use Ctrl/Cmd (Obsidian\u2019s \u201CMod\u201D) plus a key: Mod+A (show answer), Mod+E (edit), Mod+Shift+N (new in deck, avoids clashing with new note), Mod+B (batch for deck), Mod+1\u20134 (Again / Hard / Good / Easy), Mod+Z / Mod+Shift+Z (undo / redo rating). While typing in a note or text field, these are disabled. Change bindings under Obsidian Settings \u2192 Hotkeys, search "Flashcards".'
     });
     containerEl.createEl("h3", { text: "Deck Config File" });
     const desc = containerEl.createEl("p", {
@@ -1400,7 +1400,7 @@ var FlashcardsPlugin = class _FlashcardsPlugin extends import_obsidian.Plugin {
     this.addCommand({
       id: "flashcards-study-show-answer",
       name: "Flashcards: Show answer (study view)",
-      hotkeys: [{ modifiers: [], key: " " }],
+      hotkeys: [{ modifiers: ["Mod"], key: "a" }],
       checkCallback: (checking) => runStudy(
         checking,
         (v) => v.canStudyShowAnswer(),
@@ -1410,7 +1410,7 @@ var FlashcardsPlugin = class _FlashcardsPlugin extends import_obsidian.Plugin {
     this.addCommand({
       id: "flashcards-study-edit-card",
       name: "Flashcards: Edit current card (study view)",
-      hotkeys: [{ modifiers: [], key: "e" }],
+      hotkeys: [{ modifiers: ["Mod"], key: "e" }],
       checkCallback: (checking) => runStudy(
         checking,
         (v) => v.canStudyEditCard(),
@@ -1420,7 +1420,7 @@ var FlashcardsPlugin = class _FlashcardsPlugin extends import_obsidian.Plugin {
     this.addCommand({
       id: "flashcards-study-new-note",
       name: "Flashcards: New flashcard in current deck (study view)",
-      hotkeys: [{ modifiers: [], key: "n" }],
+      hotkeys: [{ modifiers: ["Mod", "Shift"], key: "n" }],
       checkCallback: (checking) => runStudy(
         checking,
         (v) => v.canStudyCreateInDeck(),
@@ -1430,7 +1430,7 @@ var FlashcardsPlugin = class _FlashcardsPlugin extends import_obsidian.Plugin {
     this.addCommand({
       id: "flashcards-study-batch-current-deck",
       name: "Flashcards: Batch create for current deck (study view)",
-      hotkeys: [{ modifiers: [], key: "b" }],
+      hotkeys: [{ modifiers: ["Mod"], key: "b" }],
       checkCallback: (checking) => runStudy(
         checking,
         (v) => v.canStudyBatchCreateInDeck(),
@@ -1440,7 +1440,7 @@ var FlashcardsPlugin = class _FlashcardsPlugin extends import_obsidian.Plugin {
     const rate = (id, name, key, rating) => this.addCommand({
       id,
       name,
-      hotkeys: [{ modifiers: [], key }],
+      hotkeys: [{ modifiers: ["Mod"], key }],
       checkCallback: (checking) => runStudy(
         checking,
         (v) => v.canStudyRate(),
