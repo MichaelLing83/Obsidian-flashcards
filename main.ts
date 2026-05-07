@@ -1129,8 +1129,20 @@ export class FlashcardView extends ItemView {
 		// ── Header ──────────────────────────────────────────────────────
 		const header = el.createDiv({ cls: "flashcard-header" });
 
-		// Progress text + bar
+		// Progress row: study mode + badge + counter + version (single line when space allows)
 		const progRow = header.createDiv({ cls: "flashcard-progress-row" });
+		const typeLabel = this.activeSelection
+			? this.plugin.getInstanceLabel(this.activeSelection.instance)
+			: "Deck";
+		progRow.createSpan({ cls: "flashcard-type-label", text: typeLabel });
+		if (rec.repetitions === 0) {
+			progRow.createSpan({ cls: "flashcard-badge flashcard-badge-new", text: "New" });
+		} else {
+			progRow.createSpan({
+				cls: "flashcard-badge flashcard-badge-review",
+				text: `${rec.interval}d`,
+			});
+		}
 		progRow.createSpan({
 			cls: "flashcard-progress-text",
 			text: `${this.idx + 1} / ${this.queue.length}`,
@@ -1145,30 +1157,11 @@ export class FlashcardView extends ItemView {
 			},
 		});
 
-		// Meta row: card type + new/review badge
-		const meta = header.createDiv({ cls: "flashcard-meta" });
-		const typeLabel = this.activeSelection
-			? this.plugin.getInstanceLabel(this.activeSelection.instance)
-			: "Deck";
-		meta.createSpan({ cls: "flashcard-type-label", text: typeLabel });
-		if (rec.repetitions === 0) {
-			meta.createSpan({ cls: "flashcard-badge flashcard-badge-new", text: "New" });
-		} else {
-			meta.createSpan({
-				cls: "flashcard-badge flashcard-badge-review",
-				text: `${rec.interval}d`,
-			});
-		}
-
 		// ── Card face ────────────────────────────────────────────────────
 		const cardEl = el.createDiv({ cls: "flashcard-card" });
 
 		// Front (or Back if reversed)
 		const frontSide = cardEl.createDiv({ cls: "flashcard-side" });
-		frontSide.createDiv({
-			cls: "flashcard-side-label",
-			text: this.activeSelection?.instance.promptSection ?? "Front",
-		});
 		const frontContent = frontSide.createDiv({ cls: "flashcard-content" });
 		await this.renderMarkdown(front, frontContent, card.file.path);
 
@@ -1176,10 +1169,6 @@ export class FlashcardView extends ItemView {
 		if (this.revealed) {
 			cardEl.createDiv({ cls: "flashcard-divider" });
 			const backSide = cardEl.createDiv({ cls: "flashcard-side" });
-			backSide.createDiv({
-				cls: "flashcard-side-label",
-				text: this.activeSelection?.instance.answerSection ?? "Back",
-			});
 			const backContent = backSide.createDiv({ cls: "flashcard-content" });
 			await this.renderMarkdown(back, backContent, card.file.path);
 		}

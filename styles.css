@@ -71,6 +71,10 @@
 	min-width: 0;
 }
 
+.flashcard-progress-row .flashcard-type-label {
+	text-align: end;
+}
+
 .flashcard-version {
 	font-size: 0.72em;
 	color: var(--text-faint);
@@ -100,14 +104,6 @@
 	background: var(--interactive-accent);
 	border-radius: 2px;
 	transition: width 0.25s ease;
-}
-
-.flashcard-meta {
-	display: flex;
-	align-items: center;
-	flex-wrap: wrap;
-	gap: 8px;
-	min-width: 0;
 }
 
 .flashcard-type-label {
@@ -163,13 +159,6 @@
 	   allow the side to shrink below its content and front/back text would overlap. */
 	flex-shrink: 0;
 	align-self: stretch;
-}
-
-.flashcard-side-label {
-	font-size: 0.72em;
-	text-transform: uppercase;
-	letter-spacing: 0.09em;
-	color: var(--text-faint);
 }
 
 .flashcard-content {

@@ -813,7 +813,6 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
     }
   }
   async renderCard(el) {
-    var _a, _b, _c, _d;
     const card = this.queue[this.idx];
     await this.refreshCardContentFromFile(card);
     const rec = this.plugin.cardData[card.id];
@@ -821,6 +820,16 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
     const back = card.back;
     const header = el.createDiv({ cls: "flashcard-header" });
     const progRow = header.createDiv({ cls: "flashcard-progress-row" });
+    const typeLabel = this.activeSelection ? this.plugin.getInstanceLabel(this.activeSelection.instance) : "Deck";
+    progRow.createSpan({ cls: "flashcard-type-label", text: typeLabel });
+    if (rec.repetitions === 0) {
+      progRow.createSpan({ cls: "flashcard-badge flashcard-badge-new", text: "New" });
+    } else {
+      progRow.createSpan({
+        cls: "flashcard-badge flashcard-badge-review",
+        text: `${rec.interval}d`
+      });
+    }
     progRow.createSpan({
       cls: "flashcard-progress-text",
       text: `${this.idx + 1} / ${this.queue.length}`
@@ -833,32 +842,13 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
         style: `width:${this.idx / this.queue.length * 100}%`
       }
     });
-    const meta = header.createDiv({ cls: "flashcard-meta" });
-    const typeLabel = this.activeSelection ? this.plugin.getInstanceLabel(this.activeSelection.instance) : "Deck";
-    meta.createSpan({ cls: "flashcard-type-label", text: typeLabel });
-    if (rec.repetitions === 0) {
-      meta.createSpan({ cls: "flashcard-badge flashcard-badge-new", text: "New" });
-    } else {
-      meta.createSpan({
-        cls: "flashcard-badge flashcard-badge-review",
-        text: `${rec.interval}d`
-      });
-    }
     const cardEl = el.createDiv({ cls: "flashcard-card" });
     const frontSide = cardEl.createDiv({ cls: "flashcard-side" });
-    frontSide.createDiv({
-      cls: "flashcard-side-label",
-      text: (_b = (_a = this.activeSelection) == null ? void 0 : _a.instance.promptSection) != null ? _b : "Front"
-    });
     const frontContent = frontSide.createDiv({ cls: "flashcard-content" });
     await this.renderMarkdown(front, frontContent, card.file.path);
     if (this.revealed) {
       cardEl.createDiv({ cls: "flashcard-divider" });
       const backSide = cardEl.createDiv({ cls: "flashcard-side" });
-      backSide.createDiv({
-        cls: "flashcard-side-label",
-        text: (_d = (_c = this.activeSelection) == null ? void 0 : _c.instance.answerSection) != null ? _d : "Back"
-      });
       const backContent = backSide.createDiv({ cls: "flashcard-content" });
       await this.renderMarkdown(back, backContent, card.file.path);
     }
