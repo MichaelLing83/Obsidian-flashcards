@@ -1406,7 +1406,7 @@ class FlashcardsSettingTab extends PluginSettingTab {
 		containerEl.createEl("h3", { text: "Study view shortcuts" });
 		containerEl.createEl("p", {
 			cls: "setting-item-description",
-			text: 'When the Flashcards study tab is focused, you can use keyboard shortcuts for ratings and toolbar actions. Defaults include Space (show answer), E (edit current card), N (new note in deck), B (batch create for current deck), 1–4 (Again / Hard / Good / Easy), and Ctrl/Cmd+Z / Ctrl/Cmd+Shift+Z (undo / redo rating). To customize or add numpad keys, open Obsidian Settings → Hotkeys and search for "Flashcards".',
+			text: 'When the Flashcards study tab is focused, you can use keyboard shortcuts for ratings and toolbar actions. Defaults include Space (show answer), E (edit current card), N (new note in deck), B (batch create for current deck), 1–4 (Again / Hard / Good / Easy), and Ctrl/Cmd+Z / Ctrl/Cmd+Shift+Z (undo / redo rating). While typing in a note or any text field, those shortcuts are disabled so keys like E work normally. To customize or add numpad keys, open Obsidian Settings → Hotkeys and search for "Flashcards".',
 		});
 
 		// Help section
@@ -1719,6 +1719,7 @@ export default class FlashcardsPlugin extends Plugin {
 			name: "Flashcards: Undo last rating",
 			hotkeys: [{ modifiers: ["Mod"], key: "z" }],
 			checkCallback: (checking) => {
+				if (this.shouldDeferFlashcardStudyHotkeys()) return false;
 				const view = this.getFlashcardView();
 				const ok = !!view?.canUndoRating();
 				if (!checking && ok) void view!.undoLastRating();
@@ -1731,6 +1732,7 @@ export default class FlashcardsPlugin extends Plugin {
 			name: "Flashcards: Redo rating",
 			hotkeys: [{ modifiers: ["Mod", "Shift"], key: "z" }],
 			checkCallback: (checking) => {
+				if (this.shouldDeferFlashcardStudyHotkeys()) return false;
 				const view = this.getFlashcardView();
 				const ok = !!view?.canRedoRating();
 				if (!checking && ok) void view!.redoLastRating();
@@ -1834,6 +1836,23 @@ export default class FlashcardsPlugin extends Plugin {
 	}
 
 	/**
+	 * When focus is in a note editor or any text field, skip flashcard hotkeys so
+	 * bare keys (e.g. "e") reach the editor. Obsidian evaluates plugin commands
+	 * globally, so this avoids stealing typing hotkeys.
+	 */
+	private shouldDeferFlashcardStudyHotkeys(): boolean {
+		const ws = this.app.workspace;
+		if (ws.activeEditor?.editor) return true;
+		if (ws.getActiveViewOfType(MarkdownView)) return true;
+
+		const el = document.activeElement;
+		if (!(el instanceof HTMLElement)) return false;
+		if (el.isContentEditable) return true;
+		const tag = el.tagName;
+		return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+	}
+
+	/**
 	 * Study-view actions with default hotkeys. Users can change bindings in
 	 * Obsidian Settings → Hotkeys (search "Flashcards").
 	 */
@@ -1843,6 +1862,7 @@ export default class FlashcardsPlugin extends Plugin {
 			enabled: (view: FlashcardView) => boolean,
 			exec: (view: FlashcardView) => void | Promise<void>,
 		): boolean => {
+			if (this.shouldDeferFlashcardStudyHotkeys()) return false;
 			const view = this.getFlashcardView();
 			if (!view) return false;
 			if (!enabled(view)) return false;
