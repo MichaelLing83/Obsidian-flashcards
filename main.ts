@@ -58,10 +58,18 @@ interface RatingRedoEntry {
 	idxAfter: number;
 }
 
+/** Per study mode: how many cards were rated on `date` (local YYYY-MM-DD). */
+interface DailyRatedEntry {
+	date: string;
+	count: number;
+}
+
 /** Shape of the persisted data.json. */
 interface PluginStoredData {
 	settings: FlashcardsSettings;
 	cards: Record<string, CardRecord>;
+	/** Daily rating counts keyed by instanceKey (see buildCardId). */
+	dailyRatedByInstance?: Record<string, DailyRatedEntry>;
 }
 
 interface DeckInstanceConfig {
@@ -661,6 +669,8 @@ export class FlashcardView extends ItemView {
 	private queueBuildError = "";
 	private queueBuildErrorFilePath = "";
 	private activeSelection: DeckInstanceSelection | null = null;
+	/** Ratings already completed today for this instance before this session started (progress display). */
+	private dailyRatedSessionBaseline = 0;
 	private ratingUndoStack: RatingUndoEntry[] = [];
 	private ratingRedoStack: RatingRedoEntry[] = [];
 
@@ -775,6 +785,9 @@ export class FlashcardView extends ItemView {
 			});
 		}
 		this.plugin.cardData[entry.cardId] = cloneCardRecord(entry.recordBefore);
+		if (this.activeSelection) {
+			this.plugin.recordStudyRatingUndone(this.activeSelection.instanceKey);
+		}
 		await this.plugin.persistData();
 		this.idx = entry.idxRated;
 		this.revealed = true;
@@ -796,6 +809,9 @@ export class FlashcardView extends ItemView {
 			});
 		}
 		this.plugin.cardData[entry.cardId] = cloneCardRecord(entry.recordAfter);
+		if (this.activeSelection) {
+			this.plugin.recordStudyRatingCompleted(this.activeSelection.instanceKey);
+		}
 		await this.plugin.persistData();
 		this.idx = entry.idxAfter;
 		this.revealed = false;
@@ -818,6 +834,7 @@ export class FlashcardView extends ItemView {
 			this.queueBuildError = selected.error;
 			this.queue = [];
 			this.idx = 0;
+			this.dailyRatedSessionBaseline = 0;
 			this.revealed = false;
 			this.render();
 			return;
@@ -828,12 +845,16 @@ export class FlashcardView extends ItemView {
 			this.queueBuildError = "No deck mode selected.";
 			this.queue = [];
 			this.idx = 0;
+			this.dailyRatedSessionBaseline = 0;
 			this.revealed = false;
 			this.render();
 			return;
 		}
 
 		await this.buildQueue(this.activeSelection);
+		this.dailyRatedSessionBaseline = this.plugin.getDailyRatedCount(
+			this.activeSelection.instanceKey,
+		);
 		this.idx = 0;
 		this.revealed = false;
 		this.render();
@@ -1127,9 +1148,13 @@ export class FlashcardView extends ItemView {
 				text: `${rec.interval}d`,
 			});
 		}
+		const b = this.dailyRatedSessionBaseline;
+		const qLen = this.queue.length;
+		const progTotal = b + qLen;
+		const progCur = b + this.idx + 1;
 		progRow.createSpan({
 			cls: "flashcard-progress-text",
-			text: `${this.idx + 1} / ${this.queue.length}`,
+			text: `${progCur} / ${progTotal}`,
 		});
 		this.renderPluginVersion(progRow);
 
@@ -1137,7 +1162,7 @@ export class FlashcardView extends ItemView {
 		bar.createDiv({
 			cls: "flashcard-progress-fill",
 			attr: {
-				style: `width:${(this.idx / this.queue.length) * 100}%`,
+				style: `width:${progTotal > 0 ? ((b + this.idx) / progTotal) * 100 : 0}%`,
 			},
 		});
 
@@ -1300,6 +1325,9 @@ export class FlashcardView extends ItemView {
 		if (rec) {
 			const recordBefore = cloneCardRecord(rec);
 			this.plugin.cardData[cardId] = applyRating(rec, rating);
+			if (this.activeSelection) {
+				this.plugin.recordStudyRatingCompleted(this.activeSelection.instanceKey);
+			}
 			await this.plugin.persistData();
 			this.ratingUndoStack.push({ cardId, recordBefore, idxRated });
 			this.ratingRedoStack.length = 0;
@@ -1454,6 +1482,8 @@ export default class FlashcardsPlugin extends Plugin {
 	settings: FlashcardsSettings = { ...DEFAULT_SETTINGS };
 	/** In-memory card records, kept in sync with data.json. */
 	cardData: Record<string, CardRecord> = {};
+	/** Ratings per study mode per local calendar day (persisted). */
+	dailyRatedByInstance: Record<string, DailyRatedEntry> = {};
 	private aiStatusBarEl: HTMLElement | null = null;
 	private aiDeckCompletionInProgress = false;
 	private aiDeckCompletionCancelRequested = false;
@@ -1656,6 +1686,9 @@ export default class FlashcardsPlugin extends Plugin {
 					: {},
 		};
 		this.cardData = stored?.cards ?? {};
+		this.dailyRatedByInstance = FlashcardsPlugin.parseDailyRatedStored(
+			stored?.dailyRatedByInstance,
+		);
 
 		// Register the study view
 		this.registerView(
@@ -1725,7 +1758,59 @@ export default class FlashcardsPlugin extends Plugin {
 		await this.saveData({
 			settings: this.settings,
 			cards: this.cardData,
+			dailyRatedByInstance: this.dailyRatedByInstance,
 		} as PluginStoredData);
+	}
+
+	/** Local calendar date YYYY-MM-DD for daily study counters. */
+	localDateKey(): string {
+		const d = new Date();
+		const y = d.getFullYear();
+		const m = String(d.getMonth() + 1).padStart(2, "0");
+		const day = String(d.getDate()).padStart(2, "0");
+		return `${y}-${m}-${day}`;
+	}
+
+	/** How many cards were rated today in this study mode (instanceKey). */
+	getDailyRatedCount(instanceKey: string): number {
+		const e = this.dailyRatedByInstance[instanceKey];
+		if (!e || e.date !== this.localDateKey()) return 0;
+		return Math.max(0, Math.floor(Number(e.count)) || 0);
+	}
+
+	recordStudyRatingCompleted(instanceKey: string): void {
+		const date = this.localDateKey();
+		const cur = this.dailyRatedByInstance[instanceKey];
+		const base = cur?.date === date ? Math.max(0, Math.floor(Number(cur.count)) || 0) : 0;
+		this.dailyRatedByInstance[instanceKey] = { date, count: base + 1 };
+	}
+
+	recordStudyRatingUndone(instanceKey: string): void {
+		const date = this.localDateKey();
+		const cur = this.dailyRatedByInstance[instanceKey];
+		const base = cur?.date === date ? Math.max(0, Math.floor(Number(cur.count)) || 0) : 0;
+		this.dailyRatedByInstance[instanceKey] = { date, count: Math.max(0, base - 1) };
+	}
+
+	private static parseDailyRatedStored(
+		raw: unknown,
+	): Record<string, DailyRatedEntry> {
+		const out: Record<string, DailyRatedEntry> = {};
+		if (!raw || typeof raw !== "object") return out;
+		for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+			if (typeof k !== "string" || !v || typeof v !== "object") continue;
+			const date = (v as { date?: unknown }).date;
+			const count = (v as { count?: unknown }).count;
+			if (
+				typeof date === "string" &&
+				/^\d{4}-\d{2}-\d{2}$/.test(date) &&
+				typeof count === "number" &&
+				Number.isFinite(count)
+			) {
+				out[k] = { date, count: Math.max(0, Math.floor(count)) };
+			}
+		}
+		return out;
 	}
 
 	/** Open (or reveal) the flashcard study panel. */

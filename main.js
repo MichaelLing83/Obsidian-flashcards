@@ -431,6 +431,8 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
     this.queueBuildError = "";
     this.queueBuildErrorFilePath = "";
     this.activeSelection = null;
+    /** Ratings already completed today for this instance before this session started (progress display). */
+    this.dailyRatedSessionBaseline = 0;
     this.ratingUndoStack = [];
     this.ratingRedoStack = [];
     this.plugin = plugin;
@@ -524,6 +526,9 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
       });
     }
     this.plugin.cardData[entry.cardId] = cloneCardRecord(entry.recordBefore);
+    if (this.activeSelection) {
+      this.plugin.recordStudyRatingUndone(this.activeSelection.instanceKey);
+    }
     await this.plugin.persistData();
     this.idx = entry.idxRated;
     this.revealed = true;
@@ -544,6 +549,9 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
       });
     }
     this.plugin.cardData[entry.cardId] = cloneCardRecord(entry.recordAfter);
+    if (this.activeSelection) {
+      this.plugin.recordStudyRatingCompleted(this.activeSelection.instanceKey);
+    }
     await this.plugin.persistData();
     this.idx = entry.idxAfter;
     this.revealed = false;
@@ -564,6 +572,7 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
       this.queueBuildError = selected.error;
       this.queue = [];
       this.idx = 0;
+      this.dailyRatedSessionBaseline = 0;
       this.revealed = false;
       this.render();
       return;
@@ -573,11 +582,15 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
       this.queueBuildError = "No deck mode selected.";
       this.queue = [];
       this.idx = 0;
+      this.dailyRatedSessionBaseline = 0;
       this.revealed = false;
       this.render();
       return;
     }
     await this.buildQueue(this.activeSelection);
+    this.dailyRatedSessionBaseline = this.plugin.getDailyRatedCount(
+      this.activeSelection.instanceKey
+    );
     this.idx = 0;
     this.revealed = false;
     this.render();
@@ -812,16 +825,20 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
         text: `${rec.interval}d`
       });
     }
+    const b = this.dailyRatedSessionBaseline;
+    const qLen = this.queue.length;
+    const progTotal = b + qLen;
+    const progCur = b + this.idx + 1;
     progRow.createSpan({
       cls: "flashcard-progress-text",
-      text: `${this.idx + 1} / ${this.queue.length}`
+      text: `${progCur} / ${progTotal}`
     });
     this.renderPluginVersion(progRow);
     const bar = header.createDiv({ cls: "flashcard-progress-bar" });
     bar.createDiv({
       cls: "flashcard-progress-fill",
       attr: {
-        style: `width:${this.idx / this.queue.length * 100}%`
+        style: `width:${progTotal > 0 ? (b + this.idx) / progTotal * 100 : 0}%`
       }
     });
     const cardEl = el.createDiv({ cls: "flashcard-card" });
@@ -959,6 +976,9 @@ var FlashcardView = class _FlashcardView extends import_obsidian.ItemView {
     if (rec) {
       const recordBefore = cloneCardRecord(rec);
       this.plugin.cardData[cardId] = applyRating(rec, rating);
+      if (this.activeSelection) {
+        this.plugin.recordStudyRatingCompleted(this.activeSelection.instanceKey);
+      }
       await this.plugin.persistData();
       this.ratingUndoStack.push({ cardId, recordBefore, idxRated });
       this.ratingRedoStack.length = 0;
@@ -1054,12 +1074,14 @@ var FlashcardsSettingTab = class extends import_obsidian.PluginSettingTab {
     });
   }
 };
-var FlashcardsPlugin = class extends import_obsidian.Plugin {
+var FlashcardsPlugin = class _FlashcardsPlugin extends import_obsidian.Plugin {
   constructor() {
     super(...arguments);
     this.settings = { ...DEFAULT_SETTINGS };
     /** In-memory card records, kept in sync with data.json. */
     this.cardData = {};
+    /** Ratings per study mode per local calendar day (persisted). */
+    this.dailyRatedByInstance = {};
     this.aiStatusBarEl = null;
     this.aiDeckCompletionInProgress = false;
     this.aiDeckCompletionCancelRequested = false;
@@ -1225,6 +1247,9 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
       ) : {}
     };
     this.cardData = (_c = stored == null ? void 0 : stored.cards) != null ? _c : {};
+    this.dailyRatedByInstance = _FlashcardsPlugin.parseDailyRatedStored(
+      stored == null ? void 0 : stored.dailyRatedByInstance
+    );
     this.registerView(
       VIEW_TYPE_FLASHCARD,
       (leaf) => new FlashcardView(leaf, this)
@@ -1280,8 +1305,48 @@ var FlashcardsPlugin = class extends import_obsidian.Plugin {
   async persistData() {
     await this.saveData({
       settings: this.settings,
-      cards: this.cardData
+      cards: this.cardData,
+      dailyRatedByInstance: this.dailyRatedByInstance
     });
+  }
+  /** Local calendar date YYYY-MM-DD for daily study counters. */
+  localDateKey() {
+    const d = /* @__PURE__ */ new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+  /** How many cards were rated today in this study mode (instanceKey). */
+  getDailyRatedCount(instanceKey) {
+    const e = this.dailyRatedByInstance[instanceKey];
+    if (!e || e.date !== this.localDateKey()) return 0;
+    return Math.max(0, Math.floor(Number(e.count)) || 0);
+  }
+  recordStudyRatingCompleted(instanceKey) {
+    const date = this.localDateKey();
+    const cur = this.dailyRatedByInstance[instanceKey];
+    const base = (cur == null ? void 0 : cur.date) === date ? Math.max(0, Math.floor(Number(cur.count)) || 0) : 0;
+    this.dailyRatedByInstance[instanceKey] = { date, count: base + 1 };
+  }
+  recordStudyRatingUndone(instanceKey) {
+    const date = this.localDateKey();
+    const cur = this.dailyRatedByInstance[instanceKey];
+    const base = (cur == null ? void 0 : cur.date) === date ? Math.max(0, Math.floor(Number(cur.count)) || 0) : 0;
+    this.dailyRatedByInstance[instanceKey] = { date, count: Math.max(0, base - 1) };
+  }
+  static parseDailyRatedStored(raw) {
+    const out = {};
+    if (!raw || typeof raw !== "object") return out;
+    for (const [k, v] of Object.entries(raw)) {
+      if (typeof k !== "string" || !v || typeof v !== "object") continue;
+      const date = v.date;
+      const count = v.count;
+      if (typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date) && typeof count === "number" && Number.isFinite(count)) {
+        out[k] = { date, count: Math.max(0, Math.floor(count)) };
+      }
+    }
+    return out;
   }
   /** Open (or reveal) the flashcard study panel. */
   async openStudyView() {
